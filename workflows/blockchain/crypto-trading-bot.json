@@ -1,0 +1,172 @@
+{
+  "name": "AI-Powered Crypto Trading Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "minutes", "minutesInterval": 15}]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule - Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  symbol,\n  target_buy_price,\n  target_sell_price,\n  stop_loss,\n  max_investment,\n  strategy\nFROM trading_pairs\nWHERE active = true;",
+        "options": {}
+      },
+      "id": "fetch-config",
+      "name": "PostgreSQL - Fetch Trading Config",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.binance.com/api/v3/ticker/price?symbol={{ $json.symbol }}",
+        "options": {}
+      },
+      "id": "fetch-price",
+      "name": "Binance - Get Current Price",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert crypto trader. Analyze market data and provide trading signals. Return JSON with: action (buy|sell|hold), confidence (0-1), reasoning, risk_level, suggested_entry_price, suggested_exit_price, stop_loss_price.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Symbol: {{ $('PostgreSQL - Fetch Trading Config').item.json.symbol }}\\nCurrent Price: {{ $json.price }}\\nConfig: {{ JSON.stringify($('PostgreSQL - Fetch Trading Config').item.json) }}\"\n    }\n  ],\n  \"temperature\": 0.4,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "ai-trading-signal",
+      "name": "GPT-4 - Generate Trading Signal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const signal = JSON.parse($input.item.json.choices[0].message.content);\nconst config = $('PostgreSQL - Fetch Trading Config').item.json;\nconst currentPrice = parseFloat($('Binance - Get Current Price').item.json.price);\n\nconst tradingDecision = {\n  trade_id: `trade_${Date.now()}`,\n  timestamp: new Date().toISOString(),\n  symbol: config.symbol,\n  current_price: currentPrice,\n  ai_signal: signal,\n  should_execute: signal.action !== 'hold' && signal.confidence >= 0.7,\n  execution_params: {\n    action: signal.action,\n    quantity: signal.action === 'buy' ? (config.max_investment / currentPrice).toFixed(8) : null,\n    limit_price: signal.suggested_entry_price || signal.suggested_exit_price,\n    stop_loss: signal.stop_loss_price || config.stop_loss\n  }\n};\n\nreturn { json: tradingDecision };"
+      },
+      "id": "process-signal",
+      "name": "Process Trading Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.should_execute }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-execute",
+      "name": "Should Execute Trade?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.binance.com/api/v3/order",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"symbol\": \"{{ $json.symbol }}\",\n  \"side\": \"{{ $json.execution_params.action.toUpperCase() }}\",\n  \"type\": \"LIMIT\",\n  \"timeInForce\": \"GTC\",\n  \"quantity\": \"{{ $json.execution_params.quantity }}\",\n  \"price\": \"{{ $json.execution_params.limit_price }}\",\n  \"timestamp\": {{ Date.now() }}\n}",
+        "options": {}
+      },
+      "id": "execute-trade",
+      "name": "Binance - Execute Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1450, 250],
+      "credentials": {
+        "httpHeaderAuth": {"id": "14", "name": "Binance API"}
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO trading_history (\n  trade_id,\n  symbol,\n  action,\n  current_price,\n  executed,\n  order_id,\n  quantity,\n  limit_price,\n  ai_confidence,\n  ai_reasoning\n) VALUES (\n  '{{ $('Process Trading Decision').item.json.trade_id }}',\n  '{{ $('Process Trading Decision').item.json.symbol }}',\n  '{{ $('Process Trading Decision').item.json.ai_signal.action }}',\n  {{ $('Process Trading Decision').item.json.current_price }},\n  {{ $('Process Trading Decision').item.json.should_execute }},\n  '{{ $json.orderId || \"\" }}',\n  '{{ $('Process Trading Decision').item.json.execution_params.quantity || \"0\" }}',\n  '{{ $('Process Trading Decision').item.json.execution_params.limit_price || \"0\" }}',\n  {{ $('Process Trading Decision').item.json.ai_signal.confidence }},\n  '{{ $('Process Trading Decision').item.json.ai_signal.reasoning }}'\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "log-trade",
+      "name": "PostgreSQL - Log Trade",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1650, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "sendMessage",
+        "channelId": "={{ $env.SLACK_TRADING_CHANNEL }}",
+        "text": "={{ $('Process Trading Decision').item.json.should_execute ? '💰' : '📊' }} *Trading Signal*\\n\\n*Symbol:* {{ $('Process Trading Decision').item.json.symbol }}\\n*Action:* {{ $('Process Trading Decision').item.json.ai_signal.action.toUpperCase() }}\\n*Current Price:* ${{ $('Process Trading Decision').item.json.current_price }}\\n*Confidence:* {{ ($('Process Trading Decision').item.json.ai_signal.confidence * 100).toFixed(0) }}%\\n*Risk Level:* {{ $('Process Trading Decision').item.json.ai_signal.risk_level }}\\n\\n*Reasoning:* {{ $('Process Trading Decision').item.json.ai_signal.reasoning }}\\n\\n{{ $('Process Trading Decision').item.json.should_execute ? `*✅ Order Executed*\\nOrder ID: ${$json.orderId || 'N/A'}` : '*⏸️ Trade Not Executed* (confidence below threshold)' }}",
+        "otherOptions": {}
+      },
+      "id": "send-notification",
+      "name": "Slack - Send Trade Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1850, 300],
+      "credentials": {
+        "slackApi": {"id": "10", "name": "Slack API"}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule - Every 15 Minutes": {
+      "main": [[{"node": "PostgreSQL - Fetch Trading Config", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Fetch Trading Config": {
+      "main": [[{"node": "Binance - Get Current Price", "type": "main", "index": 0}]]
+    },
+    "Binance - Get Current Price": {
+      "main": [[{"node": "GPT-4 - Generate Trading Signal", "type": "main", "index": 0}]]
+    },
+    "GPT-4 - Generate Trading Signal": {
+      "main": [[{"node": "Process Trading Decision", "type": "main", "index": 0}]]
+    },
+    "Process Trading Decision": {
+      "main": [[{"node": "Should Execute Trade?", "type": "main", "index": 0}]]
+    },
+    "Should Execute Trade?": {
+      "main": [
+        [{"node": "Binance - Execute Order", "type": "main", "index": 0}],
+        [{"node": "PostgreSQL - Log Trade", "type": "main", "index": 0}]
+      ]
+    },
+    "Binance - Execute Order": {
+      "main": [[{"node": "PostgreSQL - Log Trade", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Log Trade": {
+      "main": [[{"node": "Slack - Send Trade Notification", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}

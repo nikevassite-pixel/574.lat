@@ -1,0 +1,197 @@
+{
+  "name": "AI Chatbot Training & Fine-tuning Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "hours", "hoursInterval": 24}]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule - Daily Training",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  conversation_id,\n  user_message,\n  bot_response,\n  user_feedback,\n  sentiment,\n  resolved,\n  created_at\nFROM chatbot_conversations\nWHERE created_at >= NOW() - INTERVAL '7 days'\n  AND user_feedback IS NOT NULL\nORDER BY created_at DESC\nLIMIT 1000;",
+        "options": {}
+      },
+      "id": "fetch-training-data",
+      "name": "PostgreSQL - Fetch Conversation Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\n\n// Categorize conversations by quality\nconst positiveExamples = [];\nconst negativeExamples = [];\nconst neutralExamples = [];\n\nitems.forEach(item => {\n  const feedback = item.json.user_feedback;\n  const example = {\n    prompt: item.json.user_message,\n    completion: item.json.bot_response,\n    metadata: {\n      conversation_id: item.json.conversation_id,\n      feedback: feedback,\n      sentiment: item.json.sentiment,\n      resolved: item.json.resolved,\n      timestamp: item.json.created_at\n    }\n  };\n  \n  if (feedback >= 4 || (feedback >= 3 && item.json.resolved)) {\n    positiveExamples.push(example);\n  } else if (feedback <= 2) {\n    negativeExamples.push(example);\n  } else {\n    neutralExamples.push(example);\n  }\n});\n\n// Create training metrics\nconst trainingMetrics = {\n  total_examples: items.length,\n  positive_examples: positiveExamples.length,\n  negative_examples: negativeExamples.length,\n  neutral_examples: neutralExamples.length,\n  quality_score: positiveExamples.length / items.length,\n  avg_feedback: items.reduce((sum, item) => sum + (item.json.user_feedback || 0), 0) / items.length,\n  resolution_rate: items.filter(item => item.json.resolved).length / items.length\n};\n\n// Extract common patterns from negative examples\nconst negativePatterns = {};\nnegativeExamples.forEach(ex => {\n  const keywords = ex.prompt.toLowerCase().split(/\\s+/);\n  keywords.forEach(word => {\n    if (word.length > 4) {\n      negativePatterns[word] = (negativePatterns[word] || 0) + 1;\n    }\n  });\n});\n\nconst topNegativePatterns = Object.entries(negativePatterns)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 20)\n  .map(([word, count]) => ({ keyword: word, occurrences: count }));\n\nreturn {\n  json: {\n    training_id: `training_${Date.now()}`,\n    timestamp: new Date().toISOString(),\n    training_metrics: trainingMetrics,\n    positive_examples: positiveExamples.slice(0, 500),\n    negative_examples: negativeExamples,\n    problematic_patterns: topNegativePatterns,\n    recommendation: trainingMetrics.quality_score >= 0.7 ? \n      'Training data quality is good. Proceed with fine-tuning.' : \n      'Warning: Low quality training data. Review and clean data before training.'\n  }\n};"
+      },
+      "id": "prepare-training-data",
+      "name": "Prepare & Analyze Training Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a conversational AI expert. Analyze the chatbot training data and provide: 1) Improvement suggestions for responses, 2) Identified failure patterns, 3) Recommended training focus areas, 4) Suggested response templates for common queries, 5) Quality improvement strategies. Return detailed JSON.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json) }}\n    }\n  ],\n  \"temperature\": 0.4,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "gpt-analyze-training",
+      "name": "GPT-4 - Analyze Training Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate improved training examples based on negative feedback\nconst trainingData = $input.item.json;\nconst negativeExamples = trainingData.negative_examples || [];\n\n// Format for OpenAI fine-tuning JSONL\nconst finetuningExamples = trainingData.positive_examples.map(ex => ({\n  messages: [\n    { role: 'system', content: 'You are a helpful, accurate, and friendly customer support assistant.' },\n    { role: 'user', content: ex.prompt },\n    { role: 'assistant', content: ex.completion }\n  ]\n}));\n\n// Generate synthetic improved examples for negative cases\nconst syntheticExamples = negativeExamples.slice(0, 50).map(ex => ({\n  original_prompt: ex.prompt,\n  original_response: ex.completion,\n  feedback: ex.metadata.feedback,\n  needs_improvement: true\n}));\n\nreturn {\n  json: {\n    ...trainingData,\n    finetuning_data: {\n      format: 'openai_jsonl',\n      total_examples: finetuningExamples.length,\n      examples: finetuningExamples,\n      estimated_cost: (finetuningExamples.length * 0.008).toFixed(2),\n      estimated_training_time: Math.ceil(finetuningExamples.length / 100) + ' hours'\n    },\n    examples_needing_improvement: syntheticExamples\n  }\n};"
+      },
+      "id": "format-finetuning-data",
+      "name": "Format Fine-tuning Dataset",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/files",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "purpose",
+              "value": "fine-tune"
+            },
+            {
+              "name": "file",
+              "value": "={{ $json.finetuning_data.examples.map(ex => JSON.stringify(ex)).join('\\n') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "upload-training-file",
+      "name": "OpenAI - Upload Training File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1250, 200],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/fine_tuning/jobs",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"training_file\": \"{{ $json.id }}\",\n  \"model\": \"gpt-3.5-turbo\",\n  \"hyperparameters\": {\n    \"n_epochs\": 3,\n    \"batch_size\": 4,\n    \"learning_rate_multiplier\": 0.1\n  },\n  \"suffix\": \"chatbot-v{{ Date.now() }}\"\n}",
+        "options": {}
+      },
+      "id": "start-finetuning",
+      "name": "OpenAI - Start Fine-tuning Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1450, 200],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst trainingData = items.find(item => item.json.training_id)?.json;\nconst gptAnalysis = items.find(item => item.json.choices);\nconst finetuningJob = items.find(item => item.json.id && item.json.status);\n\nconst analysis = gptAnalysis ? JSON.parse(gptAnalysis.json.choices[0].message.content) : {};\n\n// Generate training report\nconst result = {\n  training_id: trainingData?.training_id,\n  timestamp: trainingData?.timestamp,\n  training_summary: {\n    data_quality_score: (trainingData?.training_metrics.quality_score * 100).toFixed(1) + '%',\n    total_examples: trainingData?.training_metrics.total_examples,\n    positive_examples: trainingData?.training_metrics.positive_examples,\n    negative_examples: trainingData?.training_metrics.negative_examples,\n    avg_user_feedback: trainingData?.training_metrics.avg_feedback.toFixed(2),\n    resolution_rate: (trainingData?.training_metrics.resolution_rate * 100).toFixed(1) + '%'\n  },\n  ai_analysis: {\n    improvement_suggestions: analysis.improvement_suggestions || [],\n    failure_patterns: analysis.failure_patterns || [],\n    focus_areas: analysis.focus_areas || [],\n    response_templates: analysis.response_templates || [],\n    quality_strategies: analysis.quality_strategies || []\n  },\n  problematic_patterns: trainingData?.problematic_patterns || [],\n  fine_tuning: {\n    status: finetuningJob ? 'initiated' : 'pending_manual_review',\n    job_id: finetuningJob?.json.id || null,\n    model: finetuningJob?.json.model || 'gpt-3.5-turbo',\n    training_file_id: finetuningJob?.json.training_file || null,\n    estimated_cost: trainingData?.finetuning_data.estimated_cost,\n    estimated_time: trainingData?.finetuning_data.estimated_training_time\n  },\n  recommendations: [\n    trainingData?.recommendation,\n    `Focus on improving ${trainingData?.negative_examples.length} low-rated interactions`,\n    `Address common failure patterns in: ${trainingData?.problematic_patterns.slice(0, 5).map(p => p.keyword).join(', ')}`,\n    ...(analysis.key_recommendations || [])\n  ],\n  metadata: {\n    training_providers: ['openai_gpt4_analysis', 'openai_finetuning'],\n    processing_time_ms: Date.now() - new Date(trainingData?.timestamp).getTime()\n  }\n};\n\nreturn { json: result };"
+      },
+      "id": "generate-training-report",
+      "name": "Generate Training Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO chatbot_training_jobs (\n  training_id,\n  data_quality_score,\n  total_examples,\n  positive_examples,\n  negative_examples,\n  avg_user_feedback,\n  resolution_rate,\n  finetuning_status,\n  finetuning_job_id,\n  model_name,\n  estimated_cost,\n  problematic_patterns,\n  ai_recommendations,\n  training_report,\n  processing_time_ms\n) VALUES (\n  '{{ $json.training_id }}',\n  '{{ $json.training_summary.data_quality_score }}',\n  {{ $json.training_summary.total_examples }},\n  {{ $json.training_summary.positive_examples }},\n  {{ $json.training_summary.negative_examples }},\n  {{ $json.training_summary.avg_user_feedback }},\n  '{{ $json.training_summary.resolution_rate }}',\n  '{{ $json.fine_tuning.status }}',\n  '{{ $json.fine_tuning.job_id || \"\" }}',\n  '{{ $json.fine_tuning.model }}',\n  '{{ $json.fine_tuning.estimated_cost }}',\n  '{{ JSON.stringify($json.problematic_patterns) }}',\n  '{{ JSON.stringify($json.ai_analysis) }}',\n  '{{ JSON.stringify($json) }}',\n  {{ $json.metadata.processing_time_ms }}\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "save-to-db",
+      "name": "PostgreSQL - Save Training Job",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1450, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "sendMessage",
+        "channelId": "={{ $env.SLACK_AI_CHANNEL }}",
+        "text": "=🤖 *Chatbot Training Report*\\n\\n*Training ID:* {{ $json.training_id }}\\n*Data Quality:* {{ $json.training_summary.data_quality_score }}\\n*Total Examples:* {{ $json.training_summary.total_examples }}\\n*Avg Feedback:* {{ $json.training_summary.avg_user_feedback }}/5\\n*Resolution Rate:* {{ $json.training_summary.resolution_rate }}\\n\\n*Fine-tuning Status:* {{ $json.fine_tuning.status }}\\n{{ $json.fine_tuning.job_id ? `*Job ID:* ${$json.fine_tuning.job_id}` : '' }}\\n*Estimated Cost:* ${{ $json.fine_tuning.estimated_cost }}\\n\\n*Top Recommendations:*\\n{{ $json.recommendations.slice(0, 5).map((rec, i) => `${i+1}. ${rec}`).join('\\n') }}",
+        "otherOptions": {}
+      },
+      "id": "send-slack-report",
+      "name": "Slack - Send Training Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1650, 300],
+      "credentials": {
+        "slackApi": {"id": "10", "name": "Slack API"}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule - Daily Training": {
+      "main": [[{"node": "PostgreSQL - Fetch Conversation Data", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Fetch Conversation Data": {
+      "main": [[{"node": "Prepare & Analyze Training Data", "type": "main", "index": 0}]]
+    },
+    "Prepare & Analyze Training Data": {
+      "main": [[{"node": "GPT-4 - Analyze Training Data", "type": "main", "index": 0}]]
+    },
+    "GPT-4 - Analyze Training Data": {
+      "main": [[{"node": "Format Fine-tuning Dataset", "type": "main", "index": 0}]]
+    },
+    "Format Fine-tuning Dataset": {
+      "main": [[
+        {"node": "OpenAI - Upload Training File", "type": "main", "index": 0},
+        {"node": "Generate Training Report", "type": "main", "index": 0}
+      ]]
+    },
+    "OpenAI - Upload Training File": {
+      "main": [[{"node": "OpenAI - Start Fine-tuning Job", "type": "main", "index": 0}]]
+    },
+    "OpenAI - Start Fine-tuning Job": {
+      "main": [[{"node": "Generate Training Report", "type": "main", "index": 0}]]
+    },
+    "Generate Training Report": {
+      "main": [[{"node": "PostgreSQL - Save Training Job", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Save Training Job": {
+      "main": [[{"node": "Slack - Send Training Report", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "ai-ml", "name": "AI & Machine Learning"}],
+  "versionId": "1.0.0"
+}

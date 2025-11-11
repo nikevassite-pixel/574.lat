@@ -1,0 +1,185 @@
+{
+  "name": "AI Recommendation Engine Builder",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "get-recommendations",
+        "httpMethod": "POST",
+        "responseMode": "responseNode"
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Request Recommendations",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const userId = $input.item.json.user_id;\nconst itemType = $input.item.json.item_type || 'product';\nconst limit = $input.item.json.limit || 10;\nconst context = $input.item.json.context || {};\n\nif (!userId) {\n  throw new Error('user_id is required');\n}\n\nreturn {\n  json: {\n    recommendation_id: `rec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,\n    timestamp: new Date().toISOString(),\n    user_id: userId,\n    item_type: itemType,\n    limit: limit,\n    context: context,\n    algorithms: ['collaborative_filtering', 'content_based', 'hybrid', 'ai_semantic']\n  }\n};"
+      },
+      "id": "validate-request",
+      "name": "Validate Recommendation Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Get user interaction history\nWITH user_interactions AS (\n  SELECT item_id, interaction_type, rating, created_at\n  FROM user_interactions\n  WHERE user_id = '{{ $json.user_id }}'\n  ORDER BY created_at DESC\n  LIMIT 100\n),\nuser_profile AS (\n  SELECT \n    preferences,\n    categories_of_interest,\n    avg_rating,\n    total_interactions\n  FROM user_profiles\n  WHERE user_id = '{{ $json.user_id }}'\n)\nSELECT \n  json_build_object(\n    'interactions', (SELECT json_agg(user_interactions.*) FROM user_interactions),\n    'profile', (SELECT row_to_json(user_profile.*) FROM user_profile)\n  ) as user_data;",
+        "options": {}
+      },
+      "id": "fetch-user-data",
+      "name": "PostgreSQL - Fetch User History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [650, 200],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Collaborative filtering: Find similar users\nWITH user_items AS (\n  SELECT DISTINCT item_id\n  FROM user_interactions\n  WHERE user_id = '{{ $json.user_id }}'\n),\nsimilar_users AS (\n  SELECT \n    ui.user_id,\n    COUNT(DISTINCT ui.item_id) as common_items,\n    AVG(ui.rating) as avg_rating\n  FROM user_interactions ui\n  WHERE ui.item_id IN (SELECT item_id FROM user_items)\n    AND ui.user_id != '{{ $json.user_id }}'\n  GROUP BY ui.user_id\n  HAVING COUNT(DISTINCT ui.item_id) >= 3\n  ORDER BY common_items DESC\n  LIMIT 50\n)\nSELECT \n  i.item_id,\n  i.item_name,\n  i.category,\n  i.tags,\n  AVG(ui.rating) as predicted_rating,\n  COUNT(DISTINCT ui.user_id) as user_count,\n  'collaborative_filtering' as algorithm\nFROM user_interactions ui\nJOIN items i ON ui.item_id = i.item_id\nWHERE ui.user_id IN (SELECT user_id FROM similar_users)\n  AND ui.item_id NOT IN (SELECT item_id FROM user_items)\nGROUP BY i.item_id, i.item_name, i.category, i.tags\nHAVING COUNT(DISTINCT ui.user_id) >= 3\nORDER BY predicted_rating DESC, user_count DESC\nLIMIT {{ $json.limit * 2 }};",
+        "options": {}
+      },
+      "id": "collaborative-filtering",
+      "name": "PostgreSQL - Collaborative Filtering",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [650, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Content-based: Items similar to user's history\nWITH user_preferences AS (\n  SELECT \n    i.category,\n    UNNEST(i.tags) as tag,\n    AVG(ui.rating) as avg_rating\n  FROM user_interactions ui\n  JOIN items i ON ui.item_id = i.item_id\n  WHERE ui.user_id = '{{ $json.user_id }}'\n  GROUP BY i.category, tag\n  HAVING AVG(ui.rating) >= 3.5\n),\nuser_interacted_items AS (\n  SELECT DISTINCT item_id FROM user_interactions WHERE user_id = '{{ $json.user_id }}'\n)\nSELECT \n  i.item_id,\n  i.item_name,\n  i.category,\n  i.tags,\n  i.description,\n  COALESCE(up_category.avg_rating, 0) * 0.4 + \n  COALESCE(AVG(up_tags.avg_rating), 0) * 0.6 as content_score,\n  'content_based' as algorithm\nFROM items i\nLEFT JOIN user_preferences up_category ON i.category = up_category.category\nLEFT JOIN user_preferences up_tags ON up_tags.tag = ANY(i.tags)\nWHERE i.item_id NOT IN (SELECT item_id FROM user_interacted_items)\n  AND (up_category.category IS NOT NULL OR up_tags.tag IS NOT NULL)\nGROUP BY i.item_id, i.item_name, i.category, i.tags, i.description, up_category.avg_rating\nORDER BY content_score DESC\nLIMIT {{ $json.limit * 2 }};",
+        "options": {}
+      },
+      "id": "content-based",
+      "name": "PostgreSQL - Content-Based Filtering",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [650, 400],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": {{ JSON.stringify($('PostgreSQL - Fetch User History').item.json.user_data.profile?.preferences || 'general interests') }}\n}",
+        "options": {}
+      },
+      "id": "get-user-embedding",
+      "name": "OpenAI - Get User Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 200],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert recommendation system. Analyze the user's interaction history and preferences to suggest personalized items. Consider: user preferences, past interactions, trending items, seasonal relevance, diversity. Return JSON with: recommended_items (array of {item_id, item_name, reasoning, predicted_rating, relevance_score}), explanation.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"User Data:\\n{{ JSON.stringify($('PostgreSQL - Fetch User History').item.json.user_data) }}\\n\\nContext:\\n{{ JSON.stringify($('Validate Recommendation Request').item.json.context) }}\\n\\nCollaborative Recommendations:\\n{{ JSON.stringify($('PostgreSQL - Collaborative Filtering').all()) }}\\n\\nContent-Based Recommendations:\\n{{ JSON.stringify($('PostgreSQL - Content-Based Filtering').all()) }}\"\n    }\n  ],\n  \"temperature\": 0.5,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "gpt-ai-recommendations",
+      "name": "GPT-4 - AI Semantic Recommendations",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst requestData = items.find(item => item.json.recommendation_id)?.json;\nconst collaborativeResults = items.filter(item => item.json.algorithm === 'collaborative_filtering');\nconst contentResults = items.filter(item => item.json.algorithm === 'content_based');\nconst aiResult = items.find(item => item.json.choices);\n\nconst aiRecommendations = aiResult ? JSON.parse(aiResult.json.choices[0].message.content) : {};\n\n// Create item score map\nconst itemScores = {};\n\n// Add collaborative filtering scores\ncollaborativeResults.forEach(item => {\n  const id = item.json.item_id;\n  if (!itemScores[id]) {\n    itemScores[id] = {\n      item_id: id,\n      item_name: item.json.item_name,\n      category: item.json.category,\n      tags: item.json.tags,\n      scores: {},\n      reasons: []\n    };\n  }\n  itemScores[id].scores.collaborative = parseFloat(item.json.predicted_rating || 0) * 20;\n  itemScores[id].reasons.push(`Recommended by ${item.json.user_count} similar users`);\n});\n\n// Add content-based scores\ncontentResults.forEach(item => {\n  const id = item.json.item_id;\n  if (!itemScores[id]) {\n    itemScores[id] = {\n      item_id: id,\n      item_name: item.json.item_name,\n      category: item.json.category,\n      tags: item.json.tags,\n      scores: {},\n      reasons: []\n    };\n  }\n  itemScores[id].scores.content_based = parseFloat(item.json.content_score || 0) * 20;\n  itemScores[id].reasons.push(`Matches your interests in ${item.json.category}`);\n});\n\n// Add AI recommendations\n(aiRecommendations.recommended_items || []).forEach(item => {\n  const id = item.item_id;\n  if (itemScores[id]) {\n    itemScores[id].scores.ai_semantic = item.relevance_score || 85;\n    itemScores[id].reasons.push(item.reasoning);\n    itemScores[id].predicted_rating = item.predicted_rating;\n  }\n});\n\n// Calculate hybrid scores (weighted average)\nconst hybridRecommendations = Object.values(itemScores).map(item => {\n  const scores = item.scores;\n  const weights = {\n    collaborative: 0.35,\n    content_based: 0.25,\n    ai_semantic: 0.40\n  };\n  \n  let hybridScore = 0;\n  let totalWeight = 0;\n  \n  Object.entries(weights).forEach(([algorithm, weight]) => {\n    if (scores[algorithm]) {\n      hybridScore += scores[algorithm] * weight;\n      totalWeight += weight;\n    }\n  });\n  \n  hybridScore = totalWeight > 0 ? hybridScore / totalWeight : 0;\n  \n  return {\n    ...item,\n    hybrid_score: parseFloat(hybridScore.toFixed(2)),\n    confidence: totalWeight >= 0.6 ? 'high' : totalWeight >= 0.3 ? 'medium' : 'low',\n    algorithms_used: Object.keys(scores),\n    predicted_rating: item.predicted_rating || (hybridScore / 20).toFixed(1)\n  };\n}).sort((a, b) => b.hybrid_score - a.hybrid_score);\n\n// Apply diversity filter to avoid recommending too many items from same category\nconst diverseRecommendations = [];\nconst categoryCount = {};\nconst maxPerCategory = Math.ceil(requestData.limit / 3);\n\nhybridRecommendations.forEach(item => {\n  const category = item.category;\n  if ((categoryCount[category] || 0) < maxPerCategory && diverseRecommendations.length < requestData.limit) {\n    diverseRecommendations.push(item);\n    categoryCount[category] = (categoryCount[category] || 0) + 1;\n  }\n});\n\n// Fill remaining slots if needed\nif (diverseRecommendations.length < requestData.limit) {\n  hybridRecommendations.forEach(item => {\n    if (!diverseRecommendations.find(r => r.item_id === item.item_id) && \n        diverseRecommendations.length < requestData.limit) {\n      diverseRecommendations.push(item);\n    }\n  });\n}\n\nconst result = {\n  recommendation_id: requestData.recommendation_id,\n  timestamp: requestData.timestamp,\n  user_id: requestData.user_id,\n  recommendations: diverseRecommendations.slice(0, requestData.limit),\n  algorithm_performance: {\n    collaborative_filtering: {\n      items_found: collaborativeResults.length,\n      avg_score: collaborativeResults.length > 0 ?\n        (collaborativeResults.reduce((sum, r) => sum + parseFloat(r.json.predicted_rating || 0), 0) / collaborativeResults.length).toFixed(2) : 0\n    },\n    content_based: {\n      items_found: contentResults.length,\n      avg_score: contentResults.length > 0 ?\n        (contentResults.reduce((sum, r) => sum + parseFloat(r.json.content_score || 0), 0) / contentResults.length).toFixed(2) : 0\n    },\n    ai_semantic: {\n      items_found: (aiRecommendations.recommended_items || []).length,\n      explanation: aiRecommendations.explanation\n    }\n  },\n  diversity_metrics: {\n    unique_categories: Object.keys(categoryCount).length,\n    category_distribution: categoryCount\n  },\n  metadata: {\n    algorithms_used: requestData.algorithms,\n    processing_time_ms: Date.now() - new Date(requestData.timestamp).getTime()\n  }\n};\n\nreturn { json: result };"
+      },
+      "id": "hybrid-ensemble",
+      "name": "Hybrid Ensemble Recommendations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO recommendation_logs (\n  recommendation_id,\n  user_id,\n  recommendations,\n  algorithm_performance,\n  diversity_score,\n  processing_time_ms\n) VALUES (\n  '{{ $json.recommendation_id }}',\n  '{{ $json.user_id }}',\n  '{{ JSON.stringify($json.recommendations) }}',\n  '{{ JSON.stringify($json.algorithm_performance) }}',\n  {{ $json.diversity_metrics.unique_categories }},\n  {{ $json.metadata.processing_time_ms }}\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "save-to-db",
+      "name": "PostgreSQL - Log Recommendations",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1450, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json, null, 2) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Request Recommendations": {
+      "main": [[{"node": "Validate Recommendation Request", "type": "main", "index": 0}]]
+    },
+    "Validate Recommendation Request": {
+      "main": [[
+        {"node": "PostgreSQL - Fetch User History", "type": "main", "index": 0},
+        {"node": "PostgreSQL - Collaborative Filtering", "type": "main", "index": 0},
+        {"node": "PostgreSQL - Content-Based Filtering", "type": "main", "index": 0}
+      ]]
+    },
+    "PostgreSQL - Fetch User History": {
+      "main": [[{"node": "OpenAI - Get User Embedding", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Collaborative Filtering": {
+      "main": [[{"node": "GPT-4 - AI Semantic Recommendations", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Content-Based Filtering": {
+      "main": [[{"node": "GPT-4 - AI Semantic Recommendations", "type": "main", "index": 0}]]
+    },
+    "OpenAI - Get User Embedding": {
+      "main": [[{"node": "GPT-4 - AI Semantic Recommendations", "type": "main", "index": 0}]]
+    },
+    "GPT-4 - AI Semantic Recommendations": {
+      "main": [[{"node": "Hybrid Ensemble Recommendations", "type": "main", "index": 0}]]
+    },
+    "Hybrid Ensemble Recommendations": {
+      "main": [[{"node": "PostgreSQL - Log Recommendations", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Log Recommendations": {
+      "main": [[{"node": "Webhook Response", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "ai-ml", "name": "AI & Machine Learning"}],
+  "versionId": "1.0.0"
+}

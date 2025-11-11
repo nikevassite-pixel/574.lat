@@ -1,0 +1,146 @@
+{
+  "name": "Predictive Analytics & Forecasting Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "hours", "hoursInterval": 6}]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule - Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  date_trunc('day', created_at) as date,\n  COUNT(*) as count,\n  SUM(amount) as total_amount,\n  AVG(amount) as avg_amount\nFROM transactions\nWHERE created_at >= NOW() - INTERVAL '90 days'\nGROUP BY date_trunc('day', created_at)\nORDER BY date ASC;",
+        "options": {}
+      },
+      "id": "fetch-historical-data",
+      "name": "PostgreSQL - Fetch Historical Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare time series data for forecasting\nconst items = $input.all();\n\nconst timeSeries = items.map(item => ({\n  date: new Date(item.json.date).toISOString().split('T')[0],\n  value: parseFloat(item.json.total_amount || item.json.count),\n  count: parseInt(item.json.count),\n  avg_value: parseFloat(item.json.avg_amount)\n}));\n\n// Calculate basic statistics\nconst values = timeSeries.map(t => t.value);\nconst mean = values.reduce((sum, v) => sum + v, 0) / values.length;\nconst variance = values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length;\nconst stdDev = Math.sqrt(variance);\n\n// Detect trend (simple linear regression)\nconst n = timeSeries.length;\nconst sumX = Array.from({length: n}, (_, i) => i).reduce((sum, x) => sum + x, 0);\nconst sumY = values.reduce((sum, v) => sum + v, 0);\nconst sumXY = values.reduce((sum, v, i) => sum + (i * v), 0);\nconst sumX2 = Array.from({length: n}, (_, i) => i).reduce((sum, x) => sum + (x * x), 0);\n\nconst slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);\nconst intercept = (sumY - slope * sumX) / n;\n\nconst trendDirection = slope > 0.1 ? 'increasing' : slope < -0.1 ? 'decreasing' : 'stable';\n\n// Detect seasonality (simplified - check for weekly patterns)\nconst weeklyAverages = {};\ntimeSeries.forEach(t => {\n  const dayOfWeek = new Date(t.date).getDay();\n  if (!weeklyAverages[dayOfWeek]) {\n    weeklyAverages[dayOfWeek] = { sum: 0, count: 0 };\n  }\n  weeklyAverages[dayOfWeek].sum += t.value;\n  weeklyAverages[dayOfWeek].count += 1;\n});\n\nconst seasonalityIndex = Object.keys(weeklyAverages).map(day => ({\n  day_of_week: parseInt(day),\n  avg_value: weeklyAverages[day].sum / weeklyAverages[day].count\n}));\n\nreturn {\n  json: {\n    analysis_id: `forecast_${Date.now()}`,\n    timestamp: new Date().toISOString(),\n    historical_data: timeSeries,\n    statistics: {\n      data_points: n,\n      mean: parseFloat(mean.toFixed(2)),\n      std_dev: parseFloat(stdDev.toFixed(2)),\n      min: Math.min(...values),\n      max: Math.max(...values)\n    },\n    trend_analysis: {\n      direction: trendDirection,\n      slope: parseFloat(slope.toFixed(4)),\n      intercept: parseFloat(intercept.toFixed(2))\n    },\n    seasonality: seasonalityIndex\n  }\n};"
+      },
+      "id": "analyze-timeseries",
+      "name": "Analyze Time Series Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a data scientist specializing in time series forecasting. Analyze the provided historical data and generate predictions for the next 7 days using appropriate forecasting methods (trend analysis, seasonality, moving averages). Return JSON with: forecast (array of {date, predicted_value, confidence_interval: {lower, upper}, confidence_score}), methodology, insights, risk_factors.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json) }}\n    }\n  ],\n  \"temperature\": 0.3,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "gpt-forecast",
+      "name": "GPT-4 - Generate Forecast",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 200],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8000/api/forecast",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {{ JSON.stringify($json.historical_data) }},\n  \"forecast_periods\": 7,\n  \"models\": [\"arima\", \"prophet\", \"exponential_smoothing\"],\n  \"confidence_level\": 0.95\n}",
+        "options": {}
+      },
+      "id": "python-forecast",
+      "name": "Python ML - Statistical Forecast",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst baseData = items.find(item => item.json.analysis_id)?.json;\n\n// Extract GPT-4 forecast\nconst gptResult = items.find(item => {\n  try {\n    const content = item.json.choices?.[0]?.message?.content;\n    if (content) {\n      const parsed = JSON.parse(content);\n      return parsed.forecast !== undefined;\n    }\n  } catch (e) {}\n  return false;\n});\nconst gptForecast = gptResult ? JSON.parse(gptResult.json.choices[0].message.content) : null;\n\n// Extract Python ML forecast\nconst pythonResult = items.find(item => item.json.forecasts || item.json.predictions);\nconst pythonForecast = pythonResult?.json;\n\n// Combine forecasts (ensemble method - weighted average)\nconst combinedForecast = [];\nif (gptForecast && pythonForecast) {\n  for (let i = 0; i < 7; i++) {\n    const gptPred = gptForecast.forecast[i];\n    const pythonPred = pythonForecast.forecasts?.arima?.[i] || pythonForecast.predictions?.[i];\n    \n    if (gptPred && pythonPred) {\n      const date = gptPred.date;\n      const gptValue = gptPred.predicted_value;\n      const pythonValue = pythonPred.value || pythonPred.predicted_value;\n      \n      // Weighted average: 40% GPT, 60% Statistical\n      const ensembleValue = (gptValue * 0.4 + pythonValue * 0.6);\n      \n      // Confidence interval\n      const gptLower = gptPred.confidence_interval?.lower || gptValue * 0.9;\n      const gptUpper = gptPred.confidence_interval?.upper || gptValue * 1.1;\n      const pythonLower = pythonPred.confidence_interval?.lower || pythonValue * 0.9;\n      const pythonUpper = pythonPred.confidence_interval?.upper || pythonValue * 1.1;\n      \n      combinedForecast.push({\n        date: date,\n        predicted_value: parseFloat(ensembleValue.toFixed(2)),\n        confidence_interval: {\n          lower: parseFloat(Math.min(gptLower, pythonLower).toFixed(2)),\n          upper: parseFloat(Math.max(gptUpper, pythonUpper).toFixed(2))\n        },\n        confidence_score: parseFloat(((gptPred.confidence_score || 0.8) * 0.5 + 0.85 * 0.5).toFixed(2)),\n        models_agreement: Math.abs(gptValue - pythonValue) / ((gptValue + pythonValue) / 2) < 0.15\n      });\n    }\n  }\n}\n\n// Calculate forecast accuracy metrics (using recent historical data)\nconst historicalValues = baseData?.historical_data.slice(-7).map(d => d.value) || [];\nconst avgHistorical = historicalValues.reduce((sum, v) => sum + v, 0) / historicalValues.length;\nconst forecastedAvg = combinedForecast.reduce((sum, f) => sum + f.predicted_value, 0) / combinedForecast.length;\nconst percentChange = ((forecastedAvg - avgHistorical) / avgHistorical * 100).toFixed(2);\n\n// Generate insights\nconst insights = [\n  `Forecast predicts ${percentChange > 0 ? 'an increase' : 'a decrease'} of ${Math.abs(percentChange)}% compared to recent average`,\n  `Trend direction: ${baseData?.trend_analysis.direction}`,\n  `Data quality: ${baseData?.statistics.data_points >= 60 ? 'Good (60+ days)' : 'Fair (less than 60 days)'}`,\n  ...(gptForecast?.insights || [])\n];\n\nconst result = {\n  analysis_id: baseData?.analysis_id,\n  timestamp: baseData?.timestamp,\n  forecast_period: `${new Date().toISOString().split('T')[0]} to ${combinedForecast[combinedForecast.length-1]?.date || 'N/A'}`,\n  historical_summary: {\n    data_points: baseData?.statistics.data_points,\n    mean: baseData?.statistics.mean,\n    trend: baseData?.trend_analysis.direction,\n    seasonality_detected: baseData?.seasonality.length > 0\n  },\n  ensemble_forecast: combinedForecast,\n  model_forecasts: {\n    gpt4_forecast: gptForecast?.forecast || [],\n    statistical_models: pythonForecast?.forecasts || {}\n  },\n  forecast_metrics: {\n    avg_predicted_value: forecastedAvg.toFixed(2),\n    percent_change_from_recent: `${percentChange}%`,\n    avg_confidence_score: (combinedForecast.reduce((sum, f) => sum + f.confidence_score, 0) / combinedForecast.length).toFixed(2),\n    models_agreement_rate: `${(combinedForecast.filter(f => f.models_agreement).length / combinedForecast.length * 100).toFixed(0)}%`\n  },\n  insights: insights,\n  risk_factors: gptForecast?.risk_factors || [],\n  methodology: gptForecast?.methodology || 'Ensemble: GPT-4 AI (40%) + Statistical Models (60%)',\n  metadata: {\n    models_used: ['gpt4', 'arima', 'prophet', 'exponential_smoothing'],\n    processing_time_ms: Date.now() - new Date(baseData?.timestamp).getTime()\n  }\n};\n\nreturn { json: result };"
+      },
+      "id": "ensemble-forecast",
+      "name": "Ensemble Forecast Aggregation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO forecasting_results (\n  analysis_id,\n  forecast_period_start,\n  forecast_period_end,\n  historical_data_points,\n  trend_direction,\n  ensemble_forecast,\n  avg_predicted_value,\n  percent_change,\n  avg_confidence_score,\n  models_agreement_rate,\n  insights,\n  risk_factors,\n  models_used,\n  processing_time_ms\n) VALUES (\n  '{{ $json.analysis_id }}',\n  CURRENT_DATE,\n  CURRENT_DATE + INTERVAL '7 days',\n  {{ $json.historical_summary.data_points }},\n  '{{ $json.historical_summary.trend }}',\n  '{{ JSON.stringify($json.ensemble_forecast) }}',\n  {{ $json.forecast_metrics.avg_predicted_value }},\n  '{{ $json.forecast_metrics.percent_change_from_recent }}',\n  {{ $json.forecast_metrics.avg_confidence_score }},\n  '{{ $json.forecast_metrics.models_agreement_rate }}',\n  '{{ JSON.stringify($json.insights) }}',\n  '{{ JSON.stringify($json.risk_factors) }}',\n  '{{ JSON.stringify($json.metadata.models_used) }}',\n  {{ $json.metadata.processing_time_ms }}\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "save-to-db",
+      "name": "PostgreSQL - Save Forecast",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1250, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "sendMessage",
+        "channelId": "={{ $env.SLACK_FORECAST_CHANNEL }}",
+        "text": "=📊 *New Forecast Generated*\\n\\n*Period:* {{ $json.forecast_period }}\\n*Predicted Change:* {{ $json.forecast_metrics.percent_change_from_recent }}\\n*Trend:* {{ $json.historical_summary.trend }}\\n*Confidence:* {{ $json.forecast_metrics.avg_confidence_score }}/1.0\\n\\n*Key Insights:*\\n{{ $json.insights.map((insight, i) => `${i+1}. ${insight}`).join('\\n') }}\\n\\n*Risk Factors:*\\n{{ ($json.risk_factors.length > 0 ? $json.risk_factors.join('\\n') : 'None identified') }}",
+        "otherOptions": {}
+      },
+      "id": "send-slack-alert",
+      "name": "Slack - Send Forecast Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1450, 300],
+      "credentials": {
+        "slackApi": {"id": "10", "name": "Slack API"}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule - Every 6 Hours": {
+      "main": [[{"node": "PostgreSQL - Fetch Historical Data", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Fetch Historical Data": {
+      "main": [[{"node": "Analyze Time Series Data", "type": "main", "index": 0}]]
+    },
+    "Analyze Time Series Data": {
+      "main": [[
+        {"node": "GPT-4 - Generate Forecast", "type": "main", "index": 0},
+        {"node": "Python ML - Statistical Forecast", "type": "main", "index": 0}
+      ]]
+    },
+    "GPT-4 - Generate Forecast": {
+      "main": [[{"node": "Ensemble Forecast Aggregation", "type": "main", "index": 0}]]
+    },
+    "Python ML - Statistical Forecast": {
+      "main": [[{"node": "Ensemble Forecast Aggregation", "type": "main", "index": 0}]]
+    },
+    "Ensemble Forecast Aggregation": {
+      "main": [[{"node": "PostgreSQL - Save Forecast", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Save Forecast": {
+      "main": [[{"node": "Slack - Send Forecast Report", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "ai-ml", "name": "AI & Machine Learning"}],
+  "versionId": "1.0.0"
+}

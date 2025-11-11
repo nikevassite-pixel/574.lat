@@ -1,0 +1,414 @@
+{
+  "name": "Speech-to-Text & Audio Transcription",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "transcribe-audio",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Audio Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "audio-transcription-webhook"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract audio file information\nconst audioFile = $input.item.binary?.data;\nconst audioUrl = $input.item.json.audio_url;\nconst options = $input.item.json.options || {};\n\nif (!audioFile && !audioUrl) {\n  throw new Error('No audio file or URL provided');\n}\n\n// Validate audio format\nconst supportedFormats = ['mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'wav', 'webm', 'flac', 'ogg'];\nconst fileName = audioFile?.fileName || audioUrl?.split('/').pop() || '';\nconst fileExtension = fileName.split('.').pop().toLowerCase();\n\nif (!supportedFormats.includes(fileExtension)) {\n  throw new Error(`Unsupported audio format: ${fileExtension}. Supported: ${supportedFormats.join(', ')}`);\n}\n\n// Extract transcription options\nconst transcriptionOptions = {\n  request_id: `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,\n  timestamp: new Date().toISOString(),\n  audio_source: audioFile ? 'upload' : 'url',\n  file_name: fileName,\n  file_extension: fileExtension,\n  language: options.language || 'auto',\n  speaker_labels: options.speaker_labels !== false,\n  word_timestamps: options.word_timestamps !== false,\n  translate_to_english: options.translate_to_english === true,\n  generate_subtitles: options.generate_subtitles !== false,\n  providers: options.providers || ['whisper', 'google', 'assemblyai']\n};\n\nreturn {\n  json: transcriptionOptions,\n  binary: audioFile ? { data: audioFile } : undefined\n};"
+      },
+      "id": "validate-audio",
+      "name": "Validate Audio Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": []
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "file",
+              "value": "={{ $binary.data }}"
+            },
+            {
+              "name": "model",
+              "value": "whisper-1"
+            },
+            {
+              "name": "language",
+              "value": "={{ $json.language === 'auto' ? '' : $json.language }}"
+            },
+            {
+              "name": "response_format",
+              "value": "verbose_json"
+            },
+            {
+              "name": "timestamp_granularities[]",
+              "value": "word"
+            },
+            {
+              "name": "timestamp_granularities[]",
+              "value": "segment"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "whisper-transcription",
+      "name": "OpenAI Whisper - Transcribe",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 200],
+      "credentials": {
+        "openAiApi": {
+          "id": "3",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "recognize",
+        "audioData": "={{ $binary.data }}",
+        "options": {
+          "languageCode": "={{ $json.language === 'auto' ? 'en-US' : $json.language + '-US' }}",
+          "enableWordTimeOffsets": "={{ $json.word_timestamps }}",
+          "enableSpeakerDiarization": "={{ $json.speaker_labels }}",
+          "diarizationSpeakerCount": 2
+        }
+      },
+      "id": "google-speech",
+      "name": "Google Speech-to-Text",
+      "type": "n8n-nodes-base.googleCloudSpeechToText",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "googleCloudSpeechToTextOAuth2Api": {
+          "id": "5",
+          "name": "Google Cloud Speech-to-Text"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.assemblyai.com/v2/upload",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/octet-stream"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "raw",
+        "rawBody": "={{ $binary.data }}",
+        "options": {}
+      },
+      "id": "assemblyai-upload",
+      "name": "AssemblyAI - Upload Audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6",
+          "name": "AssemblyAI API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.assemblyai.com/v2/transcript",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"audio_url\": \"{{ $json.upload_url }}\",\n  \"language_detection\": {{ $('Validate Audio Input').item.json.language === 'auto' }},\n  \"speaker_labels\": {{ $('Validate Audio Input').item.json.speaker_labels }},\n  \"punctuate\": true,\n  \"format_text\": true,\n  \"word_boost\": [],\n  \"boost_param\": \"default\"\n}",
+        "options": {}
+      },
+      "id": "assemblyai-transcribe",
+      "name": "AssemblyAI - Start Transcription",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6",
+          "name": "AssemblyAI API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "wait-assemblyai",
+      "name": "Wait for AssemblyAI",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.assemblyai.com/v2/transcript/{{ $json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "assemblyai-poll",
+      "name": "AssemblyAI - Check Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1250, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6",
+          "name": "AssemblyAI API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "completed"
+            }
+          ]
+        }
+      },
+      "id": "check-complete",
+      "name": "Check if Complete",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1450, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Aggregate all transcription results\nconst items = $input.all();\n\n// Get base data\nconst baseData = items.find(item => item.json.request_id)?.json;\n\n// Extract Whisper transcription\nconst whisperResult = items.find(item => item.json.text && item.json.duration);\nconst whisperData = whisperResult ? {\n  provider: 'openai_whisper',\n  text: whisperResult.json.text,\n  language: whisperResult.json.language,\n  duration: whisperResult.json.duration,\n  segments: whisperResult.json.segments?.map(seg => ({\n    start: seg.start,\n    end: seg.end,\n    text: seg.text\n  })) || [],\n  words: whisperResult.json.words?.map(w => ({\n    word: w.word,\n    start: w.start,\n    end: w.end\n  })) || []\n} : null;\n\n// Extract Google Speech-to-Text\nconst googleResult = items.find(item => item.json.results);\nconst googleData = googleResult ? {\n  provider: 'google_speech',\n  text: googleResult.json.results\n    ?.map(r => r.alternatives?.[0]?.transcript)\n    .filter(Boolean)\n    .join(' ') || '',\n  confidence: googleResult.json.results?.[0]?.alternatives?.[0]?.confidence || 0,\n  words: googleResult.json.results?.[0]?.alternatives?.[0]?.words?.map(w => ({\n    word: w.word,\n    start: parseFloat(w.startTime?.replace('s', '')) || 0,\n    end: parseFloat(w.endTime?.replace('s', '')) || 0,\n    speaker: w.speakerTag || null\n  })) || []\n} : null;\n\n// Extract AssemblyAI\nconst assemblyaiResult = items.find(item => item.json.status === 'completed' && item.json.utterances);\nconst assemblyaiData = assemblyaiResult ? {\n  provider: 'assemblyai',\n  text: assemblyaiResult.json.text,\n  confidence: assemblyaiResult.json.confidence,\n  language_code: assemblyaiResult.json.language_code,\n  utterances: assemblyaiResult.json.utterances?.map(u => ({\n    speaker: u.speaker,\n    start: u.start,\n    end: u.end,\n    text: u.text,\n    confidence: u.confidence\n  })) || [],\n  words: assemblyaiResult.json.words?.map(w => ({\n    word: w.text,\n    start: w.start / 1000,\n    end: w.end / 1000,\n    confidence: w.confidence,\n    speaker: w.speaker || null\n  })) || []\n} : null;\n\n// Combine transcriptions\nconst transcriptions = [whisperData, googleData, assemblyaiData].filter(Boolean);\n\n// Calculate word error rate (WER) approximation by comparing texts\nfunction calculateSimilarity(text1, text2) {\n  const words1 = text1.toLowerCase().split(/\\s+/);\n  const words2 = text2.toLowerCase().split(/\\s+/);\n  const maxLength = Math.max(words1.length, words2.length);\n  if (maxLength === 0) return 1;\n  \n  const commonWords = words1.filter(w => words2.includes(w)).length;\n  return commonWords / maxLength;\n}\n\n// Find best transcription (highest confidence or most complete)\nconst bestTranscription = transcriptions.reduce((best, current) => {\n  const currentScore = (current.confidence || 0.8) * (current.text?.length || 0);\n  const bestScore = (best.confidence || 0.8) * (best.text?.length || 0);\n  return currentScore > bestScore ? current : best;\n}, transcriptions[0]);\n\n// Generate SRT subtitles from best transcription\nfunction generateSRT(segments) {\n  if (!segments || segments.length === 0) return '';\n  \n  return segments.map((seg, i) => {\n    const formatTime = (seconds) => {\n      const hrs = Math.floor(seconds / 3600);\n      const mins = Math.floor((seconds % 3600) / 60);\n      const secs = Math.floor(seconds % 60);\n      const ms = Math.floor((seconds % 1) * 1000);\n      return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(ms).padStart(3, '0')}`;\n    };\n    \n    return `${i + 1}\\n${formatTime(seg.start)} --> ${formatTime(seg.end)}\\n${seg.text}\\n`;\n  }).join('\\n');\n}\n\nconst srtContent = generateSRT(\n  whisperData?.segments || \n  (googleData?.words && googleData.words.length > 0 ? \n    [{ start: googleData.words[0].start, end: googleData.words[googleData.words.length-1].end, text: googleData.text }] : [])\n);\n\n// Generate VTT subtitles\nconst vttContent = srtContent ? `WEBVTT\\n\\n${srtContent.replace(/,/g, '.')}` : '';\n\n// Build final result\nconst result = {\n  request_id: baseData?.request_id,\n  timestamp: baseData?.timestamp,\n  audio_info: {\n    file_name: baseData?.file_name,\n    format: baseData?.file_extension,\n    duration: whisperData?.duration || null\n  },\n  transcription: {\n    text: bestTranscription?.text || '',\n    language: whisperData?.language || assemblyaiData?.language_code || baseData?.language,\n    confidence: bestTranscription?.confidence || null,\n    provider: bestTranscription?.provider\n  },\n  providers_comparison: {\n    providers_used: transcriptions.map(t => t.provider),\n    text_similarity: transcriptions.length >= 2 ? \n      calculateSimilarity(transcriptions[0].text, transcriptions[1].text).toFixed(3) : null,\n    results: transcriptions\n  },\n  speaker_diarization: {\n    enabled: baseData?.speaker_labels,\n    speakers_detected: assemblyaiData?.utterances?.length > 0 ? \n      [...new Set(assemblyaiData.utterances.map(u => u.speaker))].length : null,\n    utterances: assemblyaiData?.utterances || []\n  },\n  word_timestamps: {\n    enabled: baseData?.word_timestamps,\n    total_words: bestTranscription?.words?.length || 0,\n    words: bestTranscription?.words?.slice(0, 100) || []\n  },\n  subtitles: {\n    srt: srtContent,\n    vtt: vttContent\n  },\n  metadata: {\n    processing_time_ms: Date.now() - new Date(baseData?.timestamp).getTime(),\n    providers_count: transcriptions.length\n  }\n};\n\nreturn {\n  json: result\n};"
+      },
+      "id": "aggregate-transcriptions",
+      "name": "Aggregate Transcription Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audio_transcriptions (\n  request_id,\n  file_name,\n  audio_format,\n  audio_duration,\n  transcription_text,\n  language_detected,\n  confidence_score,\n  primary_provider,\n  providers_used,\n  speakers_detected,\n  word_count,\n  srt_subtitles,\n  vtt_subtitles,\n  processing_time_ms\n) VALUES (\n  '{{ $json.request_id }}',\n  '{{ $json.audio_info.file_name }}',\n  '{{ $json.audio_info.format }}',\n  {{ $json.audio_info.duration || 'NULL' }},\n  '{{ $json.transcription.text }}',\n  '{{ $json.transcription.language }}',\n  {{ $json.transcription.confidence || 'NULL' }},\n  '{{ $json.transcription.provider }}',\n  '{{ JSON.stringify($json.providers_comparison.providers_used) }}',\n  {{ $json.speaker_diarization.speakers_detected || 'NULL' }},\n  {{ $json.word_timestamps.total_words }},\n  '{{ $json.subtitles.srt }}',\n  '{{ $json.subtitles.vtt }}',\n  {{ $json.metadata.processing_time_ms }}\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "save-to-db",
+      "name": "PostgreSQL - Save Transcription",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1250, 300],
+      "credentials": {
+        "postgres": {
+          "id": "4",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json, null, 2) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Audio Upload": {
+      "main": [
+        [
+          {
+            "node": "Validate Audio Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Audio Input": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Whisper - Transcribe",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Speech-to-Text",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "AssemblyAI - Upload Audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Whisper - Transcribe": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Transcription Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Speech-to-Text": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Transcription Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AssemblyAI - Upload Audio": {
+      "main": [
+        [
+          {
+            "node": "AssemblyAI - Start Transcription",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AssemblyAI - Start Transcription": {
+      "main": [
+        [
+          {
+            "node": "Wait for AssemblyAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for AssemblyAI": {
+      "main": [
+        [
+          {
+            "node": "AssemblyAI - Check Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AssemblyAI - Check Status": {
+      "main": [
+        [
+          {
+            "node": "Check if Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Complete": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Transcription Results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait for AssemblyAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Transcription Results": {
+      "main": [
+        [
+          {
+            "node": "PostgreSQL - Save Transcription",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PostgreSQL - Save Transcription": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2025-11-11T00:00:00.000Z",
+      "updatedAt": "2025-11-11T00:00:00.000Z",
+      "id": "ai-ml",
+      "name": "AI & Machine Learning"
+    }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0"
+}

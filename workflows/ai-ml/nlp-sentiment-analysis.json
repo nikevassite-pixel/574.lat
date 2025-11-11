@@ -1,0 +1,371 @@
+{
+  "name": "Natural Language Processing & Sentiment Analysis",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "analyze-text",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Text Input",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "nlp-analysis-webhook"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract and validate input text\nconst inputText = $input.item.json.text || $input.item.json.body?.text;\nconst language = $input.item.json.language || 'en';\nconst analysisTypes = $input.item.json.analysis_types || ['sentiment', 'entities', 'topics', 'summarization'];\n\nif (!inputText) {\n  throw new Error('No text provided for analysis');\n}\n\nif (inputText.length < 10) {\n  throw new Error('Text too short for meaningful analysis (minimum 10 characters)');\n}\n\nif (inputText.length > 50000) {\n  throw new Error('Text too long (maximum 50,000 characters)');\n}\n\nreturn {\n  json: {\n    text: inputText,\n    language: language,\n    analysis_types: analysisTypes,\n    text_length: inputText.length,\n    word_count: inputText.split(/\\s+/).length,\n    request_id: `nlp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "validate-input",
+      "name": "Validate Input Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "sentiment",
+        "text": "={{ $json.text }}",
+        "options": {
+          "language": "={{ $json.language }}"
+        }
+      },
+      "id": "huggingface-sentiment",
+      "name": "Hugging Face - Sentiment Analysis",
+      "type": "n8n-nodes-base.huggingFace",
+      "typeVersion": 1,
+      "position": [650, 200],
+      "credentials": {
+        "huggingFaceApi": {
+          "id": "1",
+          "name": "Hugging Face API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "analyzeSentiment",
+        "text": "={{ $json.text }}",
+        "options": {
+          "language": "={{ $json.language }}"
+        }
+      },
+      "id": "google-nlp-sentiment",
+      "name": "Google Cloud NLP - Sentiment",
+      "type": "n8n-nodes-base.googleCloudNaturalLanguage",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "googleCloudNaturalLanguageOAuth2Api": {
+          "id": "2",
+          "name": "Google Cloud NLP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert sentiment analyst. Analyze the sentiment of the provided text and return a JSON object with: sentiment (positive/negative/neutral/mixed), score (-1.0 to 1.0), confidence (0-1), and explanation (brief reason).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ $json.text }}\n    }\n  ],\n  \"temperature\": 0.3,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "openai-sentiment",
+      "name": "OpenAI GPT-4 - Sentiment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 400],
+      "credentials": {
+        "openAiApi": {
+          "id": "3",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "analyzeEntities",
+        "text": "={{ $json.text }}",
+        "options": {
+          "language": "={{ $json.language }}"
+        }
+      },
+      "id": "google-nlp-entities",
+      "name": "Google Cloud NLP - Entity Extraction",
+      "type": "n8n-nodes-base.googleCloudNaturalLanguage",
+      "typeVersion": 1,
+      "position": [850, 200],
+      "credentials": {
+        "googleCloudNaturalLanguageOAuth2Api": {
+          "id": "2",
+          "name": "Google Cloud NLP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Extract key topics and themes from the text. Return JSON with: topics (array of main topics), keywords (array of important keywords), categories (array of content categories like 'technology', 'business', etc.).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ $json.text }}\n    }\n  ],\n  \"temperature\": 0.4,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "openai-topics",
+      "name": "OpenAI GPT-4 - Topic Classification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "3",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Provide a concise 2-3 sentence summary of the main points in the text.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ $json.text }}\n    }\n  ],\n  \"temperature\": 0.5,\n  \"max_tokens\": 150\n}",
+        "options": {}
+      },
+      "id": "openai-summary",
+      "name": "OpenAI GPT-4 - Text Summarization",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 400],
+      "credentials": {
+        "openAiApi": {
+          "id": "3",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Aggregate all NLP analysis results\nconst items = $input.all();\n\n// Get base data from validate node\nconst baseData = items.find(item => item.json.request_id)?.json;\n\n// Extract Hugging Face sentiment\nconst hfSentiment = items.find(item => item.json.label);\nconst hfResult = hfSentiment ? {\n  provider: 'huggingface',\n  sentiment: hfSentiment.json.label?.toLowerCase(),\n  score: hfSentiment.json.score\n} : null;\n\n// Extract Google Cloud NLP sentiment\nconst googleSentiment = items.find(item => item.json.documentSentiment);\nconst googleSentimentResult = googleSentiment ? {\n  provider: 'google_nlp',\n  sentiment: googleSentiment.json.documentSentiment.score > 0.25 ? 'positive' : \n             googleSentiment.json.documentSentiment.score < -0.25 ? 'negative' : 'neutral',\n  score: googleSentiment.json.documentSentiment.score,\n  magnitude: googleSentiment.json.documentSentiment.magnitude\n} : null;\n\n// Extract OpenAI sentiment\nconst openaiSentiment = items.find(item => {\n  try {\n    const content = item.json.choices?.[0]?.message?.content;\n    if (content) {\n      const parsed = JSON.parse(content);\n      return parsed.sentiment !== undefined;\n    }\n  } catch (e) {}\n  return false;\n});\nconst openaiSentimentResult = openaiSentiment ? (() => {\n  const parsed = JSON.parse(openaiSentiment.json.choices[0].message.content);\n  return {\n    provider: 'openai_gpt4',\n    sentiment: parsed.sentiment,\n    score: parsed.score,\n    confidence: parsed.confidence,\n    explanation: parsed.explanation\n  };\n})() : null;\n\n// Extract Google Cloud NLP entities\nconst googleEntities = items.find(item => item.json.entities);\nconst entitiesResult = googleEntities ? {\n  provider: 'google_nlp',\n  entities: googleEntities.json.entities.slice(0, 20).map(e => ({\n    name: e.name,\n    type: e.type,\n    salience: e.salience,\n    mentions: e.mentions?.length || 0\n  }))\n} : null;\n\n// Extract OpenAI topics\nconst openaiTopics = items.find(item => {\n  try {\n    const content = item.json.choices?.[0]?.message?.content;\n    if (content) {\n      const parsed = JSON.parse(content);\n      return parsed.topics !== undefined;\n    }\n  } catch (e) {}\n  return false;\n});\nconst topicsResult = openaiTopics ? (() => {\n  const parsed = JSON.parse(openaiTopics.json.choices[0].message.content);\n  return {\n    provider: 'openai_gpt4',\n    topics: parsed.topics,\n    keywords: parsed.keywords,\n    categories: parsed.categories\n  };\n})() : null;\n\n// Extract OpenAI summary\nconst openaiSummary = items.find(item => {\n  try {\n    const content = item.json.choices?.[0]?.message?.content;\n    return content && !content.includes('{') && content.length < 500;\n  } catch (e) {}\n  return false;\n});\nconst summaryResult = openaiSummary ? {\n  provider: 'openai_gpt4',\n  summary: openaiSummary.json.choices[0].message.content.trim()\n} : null;\n\n// Calculate consensus sentiment\nconst sentiments = [hfResult, googleSentimentResult, openaiSentimentResult].filter(Boolean);\nconst sentimentCounts = {};\nsentiments.forEach(s => {\n  sentimentCounts[s.sentiment] = (sentimentCounts[s.sentiment] || 0) + 1;\n});\nconst consensusSentiment = Object.entries(sentimentCounts)\n  .sort((a, b) => b[1] - a[1])[0]?.[0] || 'neutral';\n\nconst avgScore = sentiments\n  .filter(s => typeof s.score === 'number')\n  .reduce((sum, s) => sum + s.score, 0) / sentiments.filter(s => typeof s.score === 'number').length;\n\n// Build final analysis object\nconst analysis = {\n  request_id: baseData?.request_id,\n  timestamp: baseData?.timestamp,\n  input: {\n    text_preview: baseData?.text.substring(0, 200) + '...',\n    text_length: baseData?.text_length,\n    word_count: baseData?.word_count,\n    language: baseData?.language\n  },\n  sentiment_analysis: {\n    consensus: {\n      sentiment: consensusSentiment,\n      score: parseFloat(avgScore.toFixed(3)),\n      confidence: sentiments.length >= 2 ? 'high' : 'medium',\n      provider_agreement: `${sentimentCounts[consensusSentiment] || 0}/${sentiments.length}`\n    },\n    providers: sentiments\n  },\n  entity_extraction: entitiesResult,\n  topic_classification: topicsResult,\n  text_summary: summaryResult,\n  metadata: {\n    providers_used: [\n      hfResult ? 'huggingface' : null,\n      googleSentimentResult || googleEntities ? 'google_nlp' : null,\n      openaiSentimentResult || openaiTopics || openaiSummary ? 'openai_gpt4' : null\n    ].filter(Boolean),\n    analysis_duration_ms: Date.now() - new Date(baseData?.timestamp).getTime()\n  }\n};\n\nreturn {\n  json: analysis\n};"
+      },
+      "id": "aggregate-results",
+      "name": "Aggregate NLP Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO nlp_analysis_log (\n  request_id,\n  text_preview,\n  text_length,\n  word_count,\n  language,\n  consensus_sentiment,\n  sentiment_score,\n  confidence_level,\n  entities_detected,\n  topics_detected,\n  summary_text,\n  providers_used,\n  analysis_duration_ms\n) VALUES (\n  '{{ $json.request_id }}',\n  '{{ $json.input.text_preview }}',\n  {{ $json.input.text_length }},\n  {{ $json.input.word_count }},\n  '{{ $json.input.language }}',\n  '{{ $json.sentiment_analysis.consensus.sentiment }}',\n  {{ $json.sentiment_analysis.consensus.score }},\n  '{{ $json.sentiment_analysis.consensus.confidence }}',\n  '{{ JSON.stringify($json.entity_extraction?.entities || []) }}',\n  '{{ JSON.stringify($json.topic_classification?.topics || []) }}',\n  '{{ $json.text_summary?.summary || \"\" }}',\n  '{{ JSON.stringify($json.metadata.providers_used) }}',\n  {{ $json.metadata.analysis_duration_ms }}\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "save-to-db",
+      "name": "PostgreSQL - Save Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1250, 300],
+      "credentials": {
+        "postgres": {
+          "id": "4",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json, null, 2) }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Text Input": {
+      "main": [
+        [
+          {
+            "node": "Validate Input Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input Text": {
+      "main": [
+        [
+          {
+            "node": "Hugging Face - Sentiment Analysis",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Cloud NLP - Sentiment",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "OpenAI GPT-4 - Sentiment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Cloud NLP - Sentiment": {
+      "main": [
+        [
+          {
+            "node": "Google Cloud NLP - Entity Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hugging Face - Sentiment Analysis": {
+      "main": [
+        [
+          {
+            "node": "Aggregate NLP Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI GPT-4 - Sentiment": {
+      "main": [
+        [
+          {
+            "node": "OpenAI GPT-4 - Topic Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Cloud NLP - Entity Extraction": {
+      "main": [
+        [
+          {
+            "node": "Aggregate NLP Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI GPT-4 - Topic Classification": {
+      "main": [
+        [
+          {
+            "node": "OpenAI GPT-4 - Text Summarization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI GPT-4 - Text Summarization": {
+      "main": [
+        [
+          {
+            "node": "Aggregate NLP Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate NLP Results": {
+      "main": [
+        [
+          {
+            "node": "PostgreSQL - Save Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PostgreSQL - Save Analysis": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2025-11-11T00:00:00.000Z",
+      "updatedAt": "2025-11-11T00:00:00.000Z",
+      "id": "ai-ml",
+      "name": "AI & Machine Learning"
+    }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0"
+}

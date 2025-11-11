@@ -1,0 +1,140 @@
+{
+  "name": "Resume Parser & AI Job Matching",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "parse-resume",
+        "httpMethod": "POST",
+        "responseMode": "responseNode"
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Resume Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const resume = $input.item.binary?.data;\nconst resumeUrl = $input.item.json.resume_url;\nconst jobDescriptions = $input.item.json.job_descriptions || [];\n\nif (!resume && !resumeUrl) {\n  throw new Error('No resume file or URL provided');\n}\n\nreturn {\n  json: {\n    parsing_id: `resume_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,\n    timestamp: new Date().toISOString(),\n    job_descriptions: jobDescriptions,\n    analysis_types: ['skills', 'experience', 'education', 'certifications', 'job_matching']\n  },\n  binary: resume ? { data: resume } : undefined\n};"
+      },
+      "id": "validate-input",
+      "name": "Validate Resume Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-vision-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert resume parser and ATS system. Extract structured information from the resume: personal_info (name, email, phone, location, linkedin), work_experience (array of {company, position, duration, responsibilities, achievements}), education (array of {institution, degree, field, graduation_year}), skills (array of {skill, category, proficiency}), certifications, languages, summary. Return JSON.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"image_url\",\n          \"image_url\": {\n            \"url\": \"data:image/jpeg;base64,{{ $binary.data.toString('base64') }}\"\n          }\n        },\n        {\n          \"type\": \"text\",\n          \"text\": \"Parse this resume and extract all structured information.\"\n        }\n      ]\n    }\n  ],\n  \"max_tokens\": 2000,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "gpt-parse-resume",
+      "name": "GPT-4 Vision - Parse Resume",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const parsedResume = JSON.parse($input.item.json.choices[0].message.content);\nconst skills = parsedResume.skills || [];\n\n// Categorize skills\nconst technicalSkills = skills.filter(s => ['programming', 'technical', 'software'].includes(s.category?.toLowerCase()));\nconst softSkills = skills.filter(s => ['soft', 'communication', 'leadership'].includes(s.category?.toLowerCase()));\n\n// Calculate experience metrics\nconst workExperience = parsedResume.work_experience || [];\nconst totalYearsExperience = workExperience.reduce((total, job) => {\n  const duration = job.duration || '';\n  const years = duration.match(/(\\d+)\\s*y/i)?.[1] || 0;\n  const months = duration.match(/(\\d+)\\s*m/i)?.[1] || 0;\n  return total + parseInt(years) + parseInt(months) / 12;\n}, 0);\n\n// Extract seniority level\nconst recentPosition = workExperience[0]?.position?.toLowerCase() || '';\nlet seniorityLevel = 'entry';\nif (recentPosition.includes('senior') || recentPosition.includes('lead') || totalYearsExperience >= 7) {\n  seniorityLevel = 'senior';\n} else if (recentPosition.includes('mid') || totalYearsExperience >= 3) {\n  seniorityLevel = 'mid';\n}\n\nreturn {\n  json: {\n    ...parsedResume,\n    derived_metrics: {\n      total_years_experience: parseFloat(totalYearsExperience.toFixed(1)),\n      seniority_level: seniorityLevel,\n      technical_skills_count: technicalSkills.length,\n      soft_skills_count: softSkills.length,\n      education_level: parsedResume.education?.[0]?.degree || 'Not specified',\n      certifications_count: (parsedResume.certifications || []).length\n    },\n    parsing_id: $('Validate Resume Input').item.json.parsing_id\n  }\n};"
+      },
+      "id": "enrich-resume-data",
+      "name": "Enrich & Analyze Resume Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert recruiter and career advisor. Match the candidate's resume with job descriptions and provide detailed analysis. For each job, return: match_score (0-100), matching_skills (array), missing_skills (array), experience_alignment, cultural_fit_indicators, strengths, concerns, recommendation (strong_fit|good_fit|potential_fit|not_recommended), reasoning.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Resume:\\n{{ JSON.stringify($json) }}\\n\\nJob Descriptions:\\n{{ JSON.stringify($('Validate Resume Input').item.json.job_descriptions) }}\"\n    }\n  ],\n  \"temperature\": 0.4,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "gpt-job-matching",
+      "name": "GPT-4 - Job Matching Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst resumeData = items.find(item => item.json.personal_info)?.json;\nconst matchingResult = items.find(item => item.json.choices);\nconst jobMatches = matchingResult ? JSON.parse(matchingResult.json.choices[0].message.content) : {};\n\n// Sort job matches by score\nconst rankedJobs = (jobMatches.job_matches || []).sort((a, b) => b.match_score - a.match_score);\n\n// Generate candidate summary\nconst candidateSummary = {\n  name: resumeData?.personal_info?.name,\n  email: resumeData?.personal_info?.email,\n  location: resumeData?.personal_info?.location,\n  years_experience: resumeData?.derived_metrics?.total_years_experience,\n  seniority_level: resumeData?.derived_metrics?.seniority_level,\n  education: resumeData?.derived_metrics?.education_level,\n  top_skills: (resumeData?.skills || []).slice(0, 10).map(s => s.skill),\n  certifications: resumeData?.certifications || []\n};\n\n// Calculate overall employability score\nconst employabilityScore = Math.round(\n  (resumeData?.derived_metrics?.total_years_experience * 10) +\n  (resumeData?.derived_metrics?.technical_skills_count * 2) +\n  (resumeData?.derived_metrics?.certifications_count * 5) +\n  (['master', 'phd'].some(d => resumeData?.derived_metrics?.education_level?.toLowerCase().includes(d)) ? 15 : 0) +\n  (['bachelor', 'bs', 'ba'].some(d => resumeData?.derived_metrics?.education_level?.toLowerCase().includes(d)) ? 10 : 0)\n);\n\nconst result = {\n  parsing_id: resumeData?.parsing_id,\n  timestamp: new Date().toISOString(),\n  candidate_summary: candidateSummary,\n  employability_score: Math.min(employabilityScore, 100),\n  full_resume_data: resumeData,\n  job_matching: {\n    jobs_analyzed: rankedJobs.length,\n    best_match: rankedJobs[0] || null,\n    all_matches: rankedJobs,\n    average_match_score: rankedJobs.length > 0 ? \n      Math.round(rankedJobs.reduce((sum, j) => sum + j.match_score, 0) / rankedJobs.length) : 0,\n    strong_fits_count: rankedJobs.filter(j => j.match_score >= 80).length,\n    good_fits_count: rankedJobs.filter(j => j.match_score >= 60 && j.match_score < 80).length\n  },\n  recommendations: {\n    skill_gaps: rankedJobs[0]?.missing_skills || [],\n    career_advice: jobMatches.career_advice || [],\n    next_steps: [\n      rankedJobs[0]?.match_score >= 80 ? 'Apply immediately to top matches' : 'Consider upskilling before applying',\n      'Focus on highlighting: ' + (rankedJobs[0]?.strengths || []).slice(0, 3).join(', '),\n      'Address concerns: ' + (rankedJobs[0]?.concerns || []).slice(0, 2).join(', ')\n    ]\n  },\n  metadata: {\n    parsing_method: 'gpt4_vision',\n    matching_model: 'gpt4_turbo',\n    processing_time_ms: Date.now() - new Date(resumeData?.timestamp || Date.now()).getTime()\n  }\n};\n\nreturn { json: result };"
+      },
+      "id": "aggregate-results",
+      "name": "Aggregate Matching Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO resume_analysis (\n  parsing_id,\n  candidate_name,\n  candidate_email,\n  years_experience,\n  seniority_level,\n  education_level,\n  employability_score,\n  top_skills,\n  certifications,\n  jobs_analyzed,\n  best_match_score,\n  best_match_job,\n  strong_fits_count,\n  skill_gaps,\n  full_resume_data,\n  job_matching_results,\n  processing_time_ms\n) VALUES (\n  '{{ $json.parsing_id }}',\n  '{{ $json.candidate_summary.name }}',\n  '{{ $json.candidate_summary.email }}',\n  {{ $json.candidate_summary.years_experience }},\n  '{{ $json.candidate_summary.seniority_level }}',\n  '{{ $json.candidate_summary.education }}',\n  {{ $json.employability_score }},\n  '{{ JSON.stringify($json.candidate_summary.top_skills) }}',\n  '{{ JSON.stringify($json.candidate_summary.certifications) }}',\n  {{ $json.job_matching.jobs_analyzed }},\n  {{ $json.job_matching.best_match?.match_score || 'NULL' }},\n  '{{ $json.job_matching.best_match?.job_title || \"\" }}',\n  {{ $json.job_matching.strong_fits_count }},\n  '{{ JSON.stringify($json.recommendations.skill_gaps) }}',\n  '{{ JSON.stringify($json.full_resume_data) }}',\n  '{{ JSON.stringify($json.job_matching.all_matches) }}',\n  {{ $json.metadata.processing_time_ms }}\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "save-to-db",
+      "name": "PostgreSQL - Save Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1450, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json, null, 2) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Resume Upload": {
+      "main": [[{"node": "Validate Resume Input", "type": "main", "index": 0}]]
+    },
+    "Validate Resume Input": {
+      "main": [[{"node": "GPT-4 Vision - Parse Resume", "type": "main", "index": 0}]]
+    },
+    "GPT-4 Vision - Parse Resume": {
+      "main": [[{"node": "Enrich & Analyze Resume Data", "type": "main", "index": 0}]]
+    },
+    "Enrich & Analyze Resume Data": {
+      "main": [[{"node": "GPT-4 - Job Matching Analysis", "type": "main", "index": 0}]]
+    },
+    "GPT-4 - Job Matching Analysis": {
+      "main": [[{"node": "Aggregate Matching Results", "type": "main", "index": 0}]]
+    },
+    "Aggregate Matching Results": {
+      "main": [[{"node": "PostgreSQL - Save Analysis", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Save Analysis": {
+      "main": [[{"node": "Webhook Response", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "ai-ml", "name": "AI & Machine Learning"}],
+  "versionId": "1.0.0"
+}

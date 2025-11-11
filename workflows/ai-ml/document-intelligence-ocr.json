@@ -1,0 +1,376 @@
+{
+  "name": "Document Intelligence & OCR Extraction",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "process-document",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Document Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "document-ocr-webhook"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Validate document input\nconst documentFile = $input.item.binary?.data;\nconst documentUrl = $input.item.json.document_url;\nconst options = $input.item.json.options || {};\n\nif (!documentFile && !documentUrl) {\n  throw new Error('No document file or URL provided');\n}\n\n// Supported document formats\nconst supportedFormats = ['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp', 'gif', 'webp'];\nconst fileName = documentFile?.fileName || documentUrl?.split('/').pop() || '';\nconst fileExtension = fileName.split('.').pop().toLowerCase();\n\nif (!supportedFormats.includes(fileExtension)) {\n  throw new Error(`Unsupported format: ${fileExtension}. Supported: ${supportedFormats.join(', ')}`);\n}\n\nconst processingOptions = {\n  request_id: `doc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,\n  timestamp: new Date().toISOString(),\n  document_source: documentFile ? 'upload' : 'url',\n  file_name: fileName,\n  file_extension: fileExtension,\n  extract_text: options.extract_text !== false,\n  extract_tables: options.extract_tables !== false,\n  extract_forms: options.extract_forms !== false,\n  detect_language: options.detect_language !== false,\n  classify_document: options.classify_document !== false,\n  extract_entities: options.extract_entities !== false,\n  providers: options.providers || ['tesseract', 'google_vision', 'azure_form_recognizer']\n};\n\nreturn {\n  json: processingOptions,\n  binary: documentFile ? { data: documentFile } : undefined\n};"
+      },
+      "id": "validate-document",
+      "name": "Validate Document Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "recognize",
+        "binaryData": "={{ $binary.data }}",
+        "options": {
+          "language": "eng",
+          "pageSegMode": "1"
+        }
+      },
+      "id": "tesseract-ocr",
+      "name": "Tesseract OCR - Extract Text",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [650, 200]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "documentTextDetection",
+        "image": "={{ $binary.data }}",
+        "options": {}
+      },
+      "id": "google-vision-ocr",
+      "name": "Google Vision AI - OCR",
+      "type": "n8n-nodes-base.googleCloudVision",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "googleCloudVisionOAuth2Api": {
+          "id": "7",
+          "name": "Google Cloud Vision"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR_REGION.api.cognitive.microsoft.com/formrecognizer/documentModels/prebuilt-document:analyze?api-version=2023-07-31",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/octet-stream"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "raw",
+        "rawBody": "={{ $binary.data }}",
+        "options": {}
+      },
+      "id": "azure-form-recognizer",
+      "name": "Azure Form Recognizer - Analyze",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "8",
+          "name": "Azure Cognitive Services Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 3,
+        "unit": "seconds"
+      },
+      "id": "wait-azure",
+      "name": "Wait for Azure Processing",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.headers['operation-location'] }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "azure-get-results",
+      "name": "Azure - Get OCR Results",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "8",
+          "name": "Azure Cognitive Services Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "succeeded"
+            }
+          ]
+        }
+      },
+      "id": "check-azure-complete",
+      "name": "Check Azure Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-vision-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a document analysis expert. Analyze the document image and classify it into one of these categories: invoice, receipt, contract, form, letter, presentation, report, resume, legal_document, medical_record, other. Also extract key metadata like document title, date, sender, recipient if visible.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"image_url\",\n          \"image_url\": {\n            \"url\": \"data:image/jpeg;base64,{{ $binary.data.toString('base64') }}\"\n          }\n        },\n        {\n          \"type\": \"text\",\n          \"text\": \"Classify this document and extract key metadata. Return JSON with: document_type, confidence, title, date, sender, recipient, summary.\"\n        }\n      ]\n    }\n  ],\n  \"max_tokens\": 500,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "gpt-vision-classify",
+      "name": "GPT-4 Vision - Classify Document",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 200],
+      "credentials": {
+        "openAiApi": {
+          "id": "3",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Aggregate all OCR and document intelligence results\nconst items = $input.all();\n\n// Get base data\nconst baseData = items.find(item => item.json.request_id)?.json;\n\n// Extract Tesseract OCR results\nconst tesseractResult = items.find(item => typeof item.json === 'string' && item.json.length > 50);\nconst tesseractText = tesseractResult?.json || '';\n\n// Extract Google Vision OCR results\nconst googleVisionResult = items.find(item => item.json.fullTextAnnotation);\nconst googleVisionData = googleVisionResult ? {\n  provider: 'google_vision',\n  text: googleVisionResult.json.fullTextAnnotation.text,\n  pages: googleVisionResult.json.fullTextAnnotation.pages?.length || 0,\n  blocks: googleVisionResult.json.fullTextAnnotation.pages?.[0]?.blocks?.length || 0,\n  confidence: googleVisionResult.json.fullTextAnnotation.pages?.[0]?.confidence || null,\n  language: googleVisionResult.json.fullTextAnnotation.pages?.[0]?.property?.detectedLanguages?.[0]?.languageCode || 'unknown'\n} : null;\n\n// Extract Azure Form Recognizer results\nconst azureResult = items.find(item => item.json.status === 'succeeded' && item.json.analyzeResult);\nconst azureData = azureResult ? {\n  provider: 'azure_form_recognizer',\n  text: azureResult.json.analyzeResult.content,\n  pages: azureResult.json.analyzeResult.pages?.length || 0,\n  tables: azureResult.json.analyzeResult.tables?.map(table => ({\n    row_count: table.rowCount,\n    column_count: table.columnCount,\n    cells: table.cells?.map(cell => ({\n      row_index: cell.rowIndex,\n      column_index: cell.columnIndex,\n      content: cell.content,\n      kind: cell.kind\n    })) || []\n  })) || [],\n  key_value_pairs: azureResult.json.analyzeResult.keyValuePairs?.map(kvp => ({\n    key: kvp.key?.content || '',\n    value: kvp.value?.content || '',\n    confidence: kvp.confidence\n  })) || [],\n  entities: azureResult.json.analyzeResult.entities?.map(ent => ({\n    category: ent.category,\n    content: ent.content,\n    confidence: ent.confidence\n  })) || []\n} : null;\n\n// Extract GPT-4 Vision classification\nconst gptVisionResult = items.find(item => {\n  try {\n    const content = item.json.choices?.[0]?.message?.content;\n    if (content) {\n      const parsed = JSON.parse(content);\n      return parsed.document_type !== undefined;\n    }\n  } catch (e) {}\n  return false;\n});\nconst documentClassification = gptVisionResult ? (() => {\n  const parsed = JSON.parse(gptVisionResult.json.choices[0].message.content);\n  return {\n    document_type: parsed.document_type,\n    confidence: parsed.confidence,\n    metadata: {\n      title: parsed.title || null,\n      date: parsed.date || null,\n      sender: parsed.sender || null,\n      recipient: parsed.recipient || null,\n      summary: parsed.summary || null\n    }\n  };\n})() : null;\n\n// Choose best OCR text (longest and most complete)\nconst ocrTexts = [\n  { provider: 'tesseract', text: tesseractText },\n  { provider: 'google_vision', text: googleVisionData?.text || '' },\n  { provider: 'azure', text: azureData?.text || '' }\n].filter(item => item.text.length > 0);\n\nconst bestOCR = ocrTexts.reduce((best, current) => {\n  return current.text.length > best.text.length ? current : best;\n}, ocrTexts[0] || { provider: 'none', text: '' });\n\n// Calculate text extraction confidence\nfunction calculateTextSimilarity(text1, text2) {\n  if (!text1 || !text2) return 0;\n  const words1 = new Set(text1.toLowerCase().split(/\\s+/));\n  const words2 = new Set(text2.toLowerCase().split(/\\s+/));\n  const intersection = new Set([...words1].filter(x => words2.has(x)));\n  const union = new Set([...words1, ...words2]);\n  return intersection.size / union.size;\n}\n\nconst ocrAgreement = ocrTexts.length >= 2 ?\n  calculateTextSimilarity(ocrTexts[0].text, ocrTexts[1].text) : null;\n\n// Build final result\nconst result = {\n  request_id: baseData?.request_id,\n  timestamp: baseData?.timestamp,\n  document_info: {\n    file_name: baseData?.file_name,\n    format: baseData?.file_extension,\n    source: baseData?.document_source\n  },\n  document_classification: documentClassification,\n  text_extraction: {\n    primary_text: bestOCR.text,\n    primary_provider: bestOCR.provider,\n    word_count: bestOCR.text.split(/\\s+/).length,\n    character_count: bestOCR.text.length,\n    language: googleVisionData?.language || 'unknown',\n    ocr_agreement_score: ocrAgreement ? parseFloat(ocrAgreement.toFixed(3)) : null\n  },\n  providers_results: {\n    tesseract: tesseractText ? {\n      text_preview: tesseractText.substring(0, 200),\n      length: tesseractText.length\n    } : null,\n    google_vision: googleVisionData,\n    azure_form_recognizer: azureData ? {\n      pages: azureData.pages,\n      tables_count: azureData.tables.length,\n      key_value_pairs_count: azureData.key_value_pairs.length,\n      entities_count: azureData.entities.length\n    } : null\n  },\n  structured_data: {\n    tables: azureData?.tables || [],\n    key_value_pairs: azureData?.key_value_pairs || [],\n    entities: azureData?.entities || []\n  },\n  metadata: {\n    providers_used: ocrTexts.map(t => t.provider),\n    processing_time_ms: Date.now() - new Date(baseData?.timestamp).getTime(),\n    pages_processed: azureData?.pages || googleVisionData?.pages || 1\n  }\n};\n\nreturn {\n  json: result\n};"
+      },
+      "id": "aggregate-ocr-results",
+      "name": "Aggregate Document Intelligence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO document_intelligence (\n  request_id,\n  file_name,\n  document_format,\n  document_type,\n  classification_confidence,\n  extracted_text,\n  word_count,\n  character_count,\n  language_detected,\n  primary_ocr_provider,\n  ocr_agreement_score,\n  tables_extracted,\n  key_value_pairs_extracted,\n  entities_extracted,\n  document_metadata,\n  providers_used,\n  pages_processed,\n  processing_time_ms\n) VALUES (\n  '{{ $json.request_id }}',\n  '{{ $json.document_info.file_name }}',\n  '{{ $json.document_info.format }}',\n  '{{ $json.document_classification?.document_type || \"unknown\" }}',\n  {{ $json.document_classification?.confidence || 'NULL' }},\n  '{{ $json.text_extraction.primary_text }}',\n  {{ $json.text_extraction.word_count }},\n  {{ $json.text_extraction.character_count }},\n  '{{ $json.text_extraction.language }}',\n  '{{ $json.text_extraction.primary_provider }}',\n  {{ $json.text_extraction.ocr_agreement_score || 'NULL' }},\n  {{ $json.structured_data.tables.length }},\n  {{ $json.structured_data.key_value_pairs.length }},\n  {{ $json.structured_data.entities.length }},\n  '{{ JSON.stringify($json.document_classification?.metadata || {}) }}',\n  '{{ JSON.stringify($json.metadata.providers_used) }}',\n  {{ $json.metadata.pages_processed }},\n  {{ $json.metadata.processing_time_ms }}\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "save-to-db",
+      "name": "PostgreSQL - Save Results",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1250, 300],
+      "credentials": {
+        "postgres": {
+          "id": "4",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json, null, 2) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Document Upload": {
+      "main": [
+        [
+          {
+            "node": "Validate Document Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Document Input": {
+      "main": [
+        [
+          {
+            "node": "Tesseract OCR - Extract Text",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Vision AI - OCR",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Azure Form Recognizer - Analyze",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "GPT-4 Vision - Classify Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tesseract OCR - Extract Text": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Document Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Vision AI - OCR": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Document Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Azure Form Recognizer - Analyze": {
+      "main": [
+        [
+          {
+            "node": "Wait for Azure Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Azure Processing": {
+      "main": [
+        [
+          {
+            "node": "Azure - Get OCR Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Azure - Get OCR Results": {
+      "main": [
+        [
+          {
+            "node": "Check Azure Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Azure Status": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Document Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait for Azure Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GPT-4 Vision - Classify Document": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Document Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Document Intelligence": {
+      "main": [
+        [
+          {
+            "node": "PostgreSQL - Save Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PostgreSQL - Save Results": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2025-11-11T00:00:00.000Z",
+      "updatedAt": "2025-11-11T00:00:00.000Z",
+      "id": "ai-ml",
+      "name": "AI & Machine Learning"
+    }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0"
+}

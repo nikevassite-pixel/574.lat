@@ -1,0 +1,209 @@
+{
+  "name": "Smart Contract Monitoring & Alert System",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "minutes", "minutesInterval": 5}]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule - Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  contract_address,\n  contract_name,\n  network,\n  abi,\n  events_to_monitor,\n  alert_conditions,\n  last_block_checked\nFROM monitored_contracts\nWHERE active = true;",
+        "options": {}
+      },
+      "id": "fetch-contracts",
+      "name": "PostgreSQL - Fetch Monitored Contracts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-in-batches",
+      "name": "Split Into Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "command": "=node scripts/check-contract-events.js --address={{ $json.contract_address }} --network={{ $json.network }} --from-block={{ $json.last_block_checked }}",
+        "options": {}
+      },
+      "id": "check-events",
+      "name": "Web3.js - Check Contract Events",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const events = JSON.parse($input.item.json);\nconst contract = $('Split Into Batches').item.json;\n\n// Parse and categorize events\nconst categorizedEvents = {\n  transfers: [],\n  approvals: [],\n  ownership_changes: [],\n  pauses: [],\n  upgrades: [],\n  custom_events: []\n};\n\nevents.forEach(event => {\n  const eventName = event.event;\n  \n  if (eventName === 'Transfer') {\n    categorizedEvents.transfers.push({\n      from: event.returnValues.from,\n      to: event.returnValues.to,\n      value: event.returnValues.value,\n      token_id: event.returnValues.tokenId,\n      transaction_hash: event.transactionHash,\n      block_number: event.blockNumber\n    });\n  } else if (eventName === 'Approval' || eventName === 'ApprovalForAll') {\n    categorizedEvents.approvals.push({\n      owner: event.returnValues.owner,\n      spender: event.returnValues.spender || event.returnValues.operator,\n      value: event.returnValues.value,\n      transaction_hash: event.transactionHash\n    });\n  } else if (eventName === 'OwnershipTransferred') {\n    categorizedEvents.ownership_changes.push({\n      previous_owner: event.returnValues.previousOwner,\n      new_owner: event.returnValues.newOwner,\n      transaction_hash: event.transactionHash\n    });\n  } else if (eventName === 'Paused' || eventName === 'Unpaused') {\n    categorizedEvents.pauses.push({\n      action: eventName.toLowerCase(),\n      transaction_hash: event.transactionHash\n    });\n  } else if (eventName === 'Upgraded') {\n    categorizedEvents.upgrades.push({\n      implementation: event.returnValues.implementation,\n      transaction_hash: event.transactionHash\n    });\n  } else {\n    categorizedEvents.custom_events.push({\n      event: eventName,\n      data: event.returnValues,\n      transaction_hash: event.transactionHash\n    });\n  }\n});\n\n// Count total events\nconst totalEvents = Object.values(categorizedEvents).reduce((sum, arr) => sum + arr.length, 0);\n\nreturn {\n  json: {\n    monitor_id: `monitor_${Date.now()}`,\n    timestamp: new Date().toISOString(),\n    contract: {\n      address: contract.contract_address,\n      name: contract.contract_name,\n      network: contract.network\n    },\n    events_detected: totalEvents,\n    categorized_events: categorizedEvents,\n    latest_block: events.length > 0 ? Math.max(...events.map(e => e.blockNumber)) : contract.last_block_checked,\n    requires_alert: totalEvents > 0\n  }\n};"
+      },
+      "id": "process-events",
+      "name": "Process & Categorize Events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.requires_alert }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-alerts",
+      "name": "Check if Alert Needed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a blockchain security analyst. Analyze smart contract events and identify: suspicious patterns, unusual transfers, potential security risks, governance changes, important state updates. Return JSON with: risk_level (low|medium|high|critical), suspicious_activities, key_findings, recommendations.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json) }}\n    }\n  ],\n  \"temperature\": 0.3,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "ai-analysis",
+      "name": "GPT-4 - Analyze Events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1450, 250],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const eventData = $input.item.json;\nconst aiAnalysis = $('GPT-4 - Analyze Events').item.json.choices ? \n  JSON.parse($('GPT-4 - Analyze Events').item.json.choices[0].message.content) : {};\n\nconst alert = {\n  alert_id: `alert_${Date.now()}`,\n  timestamp: new Date().toISOString(),\n  contract: eventData.contract,\n  events_summary: {\n    total_events: eventData.events_detected,\n    transfers: eventData.categorized_events.transfers.length,\n    ownership_changes: eventData.categorized_events.ownership_changes.length,\n    pauses: eventData.categorized_events.pauses.length,\n    upgrades: eventData.categorized_events.upgrades.length\n  },\n  ai_analysis: aiAnalysis,\n  risk_level: aiAnalysis.risk_level || 'low',\n  priority: aiAnalysis.risk_level === 'critical' ? 'urgent' : \n            aiAnalysis.risk_level === 'high' ? 'high' : 'normal',\n  notable_events: [\n    ...eventData.categorized_events.ownership_changes.map(e => `Ownership transferred to ${e.new_owner}`),\n    ...eventData.categorized_events.upgrades.map(e => `Contract upgraded to ${e.implementation}`),\n    ...eventData.categorized_events.pauses.map(e => `Contract ${e.action}`)\n  ],\n  raw_events: eventData.categorized_events\n};\n\nreturn { json: alert };"
+      },
+      "id": "generate-alert",
+      "name": "Generate Alert Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 250]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contract_alerts (\n  alert_id,\n  contract_address,\n  contract_name,\n  network,\n  events_detected,\n  risk_level,\n  priority,\n  notable_events,\n  ai_analysis,\n  raw_events\n) VALUES (\n  '{{ $json.alert_id }}',\n  '{{ $json.contract.address }}',\n  '{{ $json.contract.name }}',\n  '{{ $json.contract.network }}',\n  {{ $json.events_summary.total_events }},\n  '{{ $json.risk_level }}',\n  '{{ $json.priority }}',\n  '{{ JSON.stringify($json.notable_events) }}',\n  '{{ JSON.stringify($json.ai_analysis) }}',\n  '{{ JSON.stringify($json.raw_events) }}'\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "save-alert",
+      "name": "PostgreSQL - Save Alert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1850, 250],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "sendMessage",
+        "channelId": "={{ $env.SLACK_BLOCKCHAIN_CHANNEL }}",
+        "text": "={{ $json.risk_level === 'critical' || $json.risk_level === 'high' ? '🚨' : '⚠️' }} *Smart Contract Alert*\\n\\n*Contract:* {{ $json.contract.name }}\\n*Address:* `{{ $json.contract.address }}`\\n*Network:* {{ $json.contract.network }}\\n*Risk Level:* {{ $json.risk_level.toUpperCase() }}\\n\\n*Events Detected:* {{ $json.events_summary.total_events }}\\n- Transfers: {{ $json.events_summary.transfers }}\\n- Ownership Changes: {{ $json.events_summary.ownership_changes }}\\n- Upgrades: {{ $json.events_summary.upgrades }}\\n\\n*Key Findings:*\\n{{ ($json.ai_analysis.key_findings || []).map((f, i) => `${i+1}. ${f}`).join('\\n') }}\\n\\n*Recommendations:*\\n{{ ($json.ai_analysis.recommendations || []).map((r, i) => `${i+1}. ${r}`).join('\\n') }}",
+        "otherOptions": {}
+      },
+      "id": "send-slack-alert",
+      "name": "Slack - Send Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2050, 250],
+      "credentials": {
+        "slackApi": {"id": "10", "name": "Slack API"}
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE monitored_contracts \nSET last_block_checked = {{ $json.latest_block }},\n    last_check_timestamp = NOW()\nWHERE contract_address = '{{ $json.contract.address }}';",
+        "options": {}
+      },
+      "id": "update-last-block",
+      "name": "PostgreSQL - Update Last Block",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1450, 350],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {},
+      "id": "loop-back",
+      "name": "Loop Back to Next Contract",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1250, 450]
+    }
+  ],
+  "connections": {
+    "Schedule - Every 5 Minutes": {
+      "main": [[{"node": "PostgreSQL - Fetch Monitored Contracts", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Fetch Monitored Contracts": {
+      "main": [[{"node": "Split Into Batches", "type": "main", "index": 0}]]
+    },
+    "Split Into Batches": {
+      "main": [[{"node": "Web3.js - Check Contract Events", "type": "main", "index": 0}]]
+    },
+    "Web3.js - Check Contract Events": {
+      "main": [[{"node": "Process & Categorize Events", "type": "main", "index": 0}]]
+    },
+    "Process & Categorize Events": {
+      "main": [[{"node": "Check if Alert Needed", "type": "main", "index": 0}]]
+    },
+    "Check if Alert Needed": {
+      "main": [
+        [{"node": "GPT-4 - Analyze Events", "type": "main", "index": 0}],
+        [{"node": "PostgreSQL - Update Last Block", "type": "main", "index": 0}]
+      ]
+    },
+    "GPT-4 - Analyze Events": {
+      "main": [[{"node": "Generate Alert Report", "type": "main", "index": 0}]]
+    },
+    "Generate Alert Report": {
+      "main": [[{"node": "PostgreSQL - Save Alert", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Save Alert": {
+      "main": [[{"node": "Slack - Send Alert", "type": "main", "index": 0}]]
+    },
+    "Slack - Send Alert": {
+      "main": [[{"node": "Loop Back to Next Contract", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Update Last Block": {
+      "main": [[{"node": "Loop Back to Next Contract", "type": "main", "index": 0}]]
+    },
+    "Loop Back to Next Contract": {
+      "main": [[{"node": "Split Into Batches", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}

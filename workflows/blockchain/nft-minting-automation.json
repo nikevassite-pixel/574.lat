@@ -1,0 +1,183 @@
+{
+  "name": "NFT Minting & Marketplace Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "mint-nft",
+        "httpMethod": "POST",
+        "responseMode": "responseNode"
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - NFT Mint Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const metadata = $input.item.json.metadata || {};\nconst imageFile = $input.item.binary?.image;\nconst imageUrl = $input.item.json.image_url;\nconst network = $input.item.json.network || 'ethereum';\nconst collection = $input.item.json.collection;\n\nif (!metadata.name) {\n  throw new Error('NFT name is required in metadata');\n}\n\nif (!imageFile && !imageUrl) {\n  throw new Error('Image file or URL is required');\n}\n\nreturn {\n  json: {\n    mint_id: `nft_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,\n    timestamp: new Date().toISOString(),\n    network: network,\n    collection: collection || 'default',\n    metadata: {\n      name: metadata.name,\n      description: metadata.description || '',\n      attributes: metadata.attributes || [],\n      external_url: metadata.external_url || '',\n      animation_url: metadata.animation_url || ''\n    },\n    image_source: imageFile ? 'upload' : 'url',\n    image_url: imageUrl\n  },\n  binary: imageFile ? { image: imageFile } : undefined\n};"
+      },
+      "id": "validate-nft-data",
+      "name": "Validate NFT Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.pinata.cloud/pinning/pinFileToIPFS",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "file",
+              "value": "={{ $binary.image }}"
+            },
+            {
+              "name": "pinataMetadata",
+              "value": "={{ JSON.stringify({name: $json.metadata.name + '_image'}) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "upload-to-ipfs",
+      "name": "Pinata - Upload Image to IPFS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300],
+      "credentials": {
+        "httpHeaderAuth": {"id": "12", "name": "Pinata API Key"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const ipfsHash = $input.item.json.IpfsHash;\nconst metadata = $('Validate NFT Data').item.json.metadata;\n\n// Create NFT metadata following ERC-721 standard\nconst nftMetadata = {\n  name: metadata.name,\n  description: metadata.description,\n  image: `ipfs://${ipfsHash}`,\n  external_url: metadata.external_url,\n  animation_url: metadata.animation_url,\n  attributes: metadata.attributes,\n  properties: {\n    created_by: 'n8n_automation',\n    timestamp: new Date().toISOString()\n  }\n};\n\nreturn {\n  json: {\n    ...nftMetadata,\n    image_ipfs_hash: ipfsHash,\n    image_ipfs_url: `https://gateway.pinata.cloud/ipfs/${ipfsHash}`\n  }\n};"
+      },
+      "id": "create-metadata",
+      "name": "Create NFT Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.pinata.cloud/pinning/pinJSONToIPFS",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"pinataContent\": {{ JSON.stringify($json) }},\n  \"pinataMetadata\": {\n    \"name\": \"{{ $json.name }}_metadata\"\n  }\n}",
+        "options": {}
+      },
+      "id": "upload-metadata-ipfs",
+      "name": "Pinata - Upload Metadata to IPFS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 300],
+      "credentials": {
+        "httpHeaderAuth": {"id": "12", "name": "Pinata API Key"}
+      }
+    },
+    {
+      "parameters": {
+        "command": "=node scripts/mint-nft.js --network={{ $('Validate NFT Data').item.json.network }} --metadata-uri=ipfs://{{ $json.IpfsHash }} --collection={{ $('Validate NFT Data').item.json.collection }}",
+        "options": {}
+      },
+      "id": "mint-on-chain",
+      "name": "Mint NFT On-Chain (Web3.js)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const mintResult = JSON.parse($input.item.json);\nconst baseData = $('Validate NFT Data').item.json;\nconst metadataHash = $('Pinata - Upload Metadata to IPFS').item.json.IpfsHash;\nconst imageData = $('Create NFT Metadata').item.json;\n\n// Parse transaction result\nconst result = {\n  mint_id: baseData.mint_id,\n  timestamp: baseData.timestamp,\n  nft_data: {\n    token_id: mintResult.tokenId,\n    contract_address: mintResult.contractAddress,\n    network: baseData.network,\n    collection: baseData.collection,\n    name: baseData.metadata.name,\n    description: baseData.metadata.description\n  },\n  ipfs_data: {\n    image_hash: imageData.image_ipfs_hash,\n    image_url: imageData.image_ipfs_url,\n    metadata_hash: metadataHash,\n    metadata_url: `https://gateway.pinata.cloud/ipfs/${metadataHash}`\n  },\n  blockchain_data: {\n    transaction_hash: mintResult.transactionHash,\n    block_number: mintResult.blockNumber,\n    gas_used: mintResult.gasUsed,\n    status: mintResult.status === 1 ? 'success' : 'failed'\n  },\n  marketplace_urls: {\n    opensea: `https://opensea.io/assets/${baseData.network}/${mintResult.contractAddress}/${mintResult.tokenId}`,\n    rarible: `https://rarible.com/token/${mintResult.contractAddress}:${mintResult.tokenId}`,\n    looksrare: `https://looksrare.org/collections/${mintResult.contractAddress}/${mintResult.tokenId}`\n  },\n  metadata: {\n    minting_time_ms: Date.now() - new Date(baseData.timestamp).getTime()\n  }\n};\n\nreturn { json: result };"
+      },
+      "id": "aggregate-mint-result",
+      "name": "Aggregate Mint Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO nft_mints (\n  mint_id,\n  token_id,\n  contract_address,\n  network,\n  collection_name,\n  nft_name,\n  nft_description,\n  image_ipfs_hash,\n  metadata_ipfs_hash,\n  transaction_hash,\n  block_number,\n  gas_used,\n  status,\n  opensea_url,\n  minting_time_ms\n) VALUES (\n  '{{ $json.mint_id }}',\n  '{{ $json.nft_data.token_id }}',\n  '{{ $json.nft_data.contract_address }}',\n  '{{ $json.nft_data.network }}',\n  '{{ $json.nft_data.collection }}',\n  '{{ $json.nft_data.name }}',\n  '{{ $json.nft_data.description }}',\n  '{{ $json.ipfs_data.image_hash }}',\n  '{{ $json.ipfs_data.metadata_hash }}',\n  '{{ $json.blockchain_data.transaction_hash }}',\n  {{ $json.blockchain_data.block_number }},\n  {{ $json.blockchain_data.gas_used }},\n  '{{ $json.blockchain_data.status }}',\n  '{{ $json.marketplace_urls.opensea }}',\n  {{ $json.metadata.minting_time_ms }}\n) RETURNING *;",
+        "options": {}
+      },
+      "id": "save-to-db",
+      "name": "PostgreSQL - Save NFT Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1650, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "text": "=🎨 *New NFT Minted!*\\n\\n*Name:* {{ $json.nft_data.name }}\\n*Token ID:* {{ $json.nft_data.token_id }}\\n*Network:* {{ $json.nft_data.network }}\\n*Contract:* `{{ $json.nft_data.contract_address }}`\\n\\n*Transaction:* {{ $json.blockchain_data.transaction_hash }}\\n*Gas Used:* {{ $json.blockchain_data.gas_used }}\\n\\n*View on OpenSea:* {{ $json.marketplace_urls.opensea }}\\n*View on Rarible:* {{ $json.marketplace_urls.rarible }}",
+        "additionalFields": {}
+      },
+      "id": "post-to-twitter",
+      "name": "Twitter - Announce NFT",
+      "type": "n8n-nodes-base.twitter",
+      "typeVersion": 2,
+      "position": [1850, 250],
+      "credentials": {
+        "twitterOAuth2Api": {"id": "13", "name": "Twitter API"}
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json, null, 2) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1850, 350]
+    }
+  ],
+  "connections": {
+    "Webhook - NFT Mint Request": {
+      "main": [[{"node": "Validate NFT Data", "type": "main", "index": 0}]]
+    },
+    "Validate NFT Data": {
+      "main": [[{"node": "Pinata - Upload Image to IPFS", "type": "main", "index": 0}]]
+    },
+    "Pinata - Upload Image to IPFS": {
+      "main": [[{"node": "Create NFT Metadata", "type": "main", "index": 0}]]
+    },
+    "Create NFT Metadata": {
+      "main": [[{"node": "Pinata - Upload Metadata to IPFS", "type": "main", "index": 0}]]
+    },
+    "Pinata - Upload Metadata to IPFS": {
+      "main": [[{"node": "Mint NFT On-Chain (Web3.js)", "type": "main", "index": 0}]]
+    },
+    "Mint NFT On-Chain (Web3.js)": {
+      "main": [[{"node": "Aggregate Mint Result", "type": "main", "index": 0}]]
+    },
+    "Aggregate Mint Result": {
+      "main": [[{"node": "PostgreSQL - Save NFT Record", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Save NFT Record": {
+      "main": [[
+        {"node": "Twitter - Announce NFT", "type": "main", "index": 0},
+        {"node": "Webhook Response", "type": "main", "index": 0}
+      ]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}

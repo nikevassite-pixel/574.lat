@@ -1,0 +1,264 @@
+{
+  "name": "9. Computer Vision Image Analysis Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "/webhook/vision-upload",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Image Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "webhookId": "vision-upload"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and validate image data\nconst item = $input.first();\nconst body = item.json.body;\n\n// Support multiple input formats\nlet imageData;\nif (body.image_url) {\n  imageData = { url: body.image_url, type: 'url' };\n} else if (body.image_base64) {\n  imageData = { data: body.image_base64, type: 'base64' };\n} else if (item.binary?.data) {\n  imageData = { binary: item.binary.data, type: 'binary' };\n}\n\nconst config = {\n  image: imageData,\n  tasks: body.tasks || ['detect', 'classify', 'ocr', 'describe'],\n  output_format: body.output_format || 'json',\n  confidence_threshold: body.confidence_threshold || 0.7,\n  request_id: `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,\n  timestamp: new Date().toISOString()\n};\n\nreturn { json: config };"
+      },
+      "id": "parse-request",
+      "name": "Parse Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "image",
+        "operation": "analyze",
+        "model": "gpt-4-vision-preview",
+        "prompt": "=Analyze this image in detail. Identify: 1) Main objects and their positions 2) Scene context 3) Colors and composition 4) Text visible 5) Actions/activities 6) Quality and technical aspects",
+        "imageUrl": "={{ $json.image.url }}",
+        "options": {
+          "maxTokens": 500
+        }
+      },
+      "id": "openai-vision",
+      "name": "OpenAI Vision Analysis",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1.3,
+      "position": [650, 200],
+      "credentials": {
+        "openAiApi": {
+          "id": "4",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://vision.googleapis.com/v1/images:annotate",
+        "authentication": "serviceAccount",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "key", "value": "={{ $json.googleApiKey }}"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  requests: [{\n    image: $json.image.type === 'url' ? { source: { imageUri: $json.image.url }} : { content: $json.image.data },\n    features: [\n      { type: 'LABEL_DETECTION', maxResults: 10 },\n      { type: 'OBJECT_LOCALIZATION', maxResults: 10 },\n      { type: 'TEXT_DETECTION' },\n      { type: 'FACE_DETECTION' },\n      { type: 'SAFE_SEARCH_DETECTION' },\n      { type: 'IMAGE_PROPERTIES' }\n    ]\n  }]\n} }}"
+      },
+      "id": "google-vision",
+      "name": "Google Vision API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.clarifai.com/v2/models/general-image-recognition/outputs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  inputs: [{\n    data: {\n      image: $json.image.type === 'url' ? { url: $json.image.url } : { base64: $json.image.data }\n    }\n  }]\n} }}"
+      },
+      "id": "clarifai-recognition",
+      "name": "Clarifai Image Recognition",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine results from all vision services\nconst openaiResult = $input.item(0).json;\nconst googleResult = $input.item(1).json;\nconst clarifaiResult = $input.item(2).json;\n\n// Extract OpenAI insights\nconst openaiAnalysis = {\n  description: openaiResult.choices[0].message.content,\n  provider: 'openai'\n};\n\n// Extract Google Vision results\nconst googleAnnotations = googleResult.responses[0];\nconst googleAnalysis = {\n  labels: googleAnnotations.labelAnnotations?.map(l => ({\n    label: l.description,\n    score: l.score,\n    confidence: (l.score * 100).toFixed(2) + '%'\n  })) || [],\n  objects: googleAnnotations.localizedObjectAnnotations?.map(o => ({\n    name: o.name,\n    score: o.score,\n    boundingBox: o.boundingPoly\n  })) || [],\n  text: googleAnnotations.textAnnotations?.[0]?.description || null,\n  faces: {\n    count: googleAnnotations.faceAnnotations?.length || 0,\n    details: googleAnnotations.faceAnnotations?.map(f => ({\n      joy: f.joyLikelihood,\n      sorrow: f.sorrowLikelihood,\n      anger: f.angerLikelihood,\n      surprise: f.surpriseLikelihood,\n      confidence: f.detectionConfidence\n    })) || []\n  },\n  safeSearch: googleAnnotations.safeSearchAnnotation,\n  colors: googleAnnotations.imagePropertiesAnnotation?.dominantColors?.colors?.slice(0, 5).map(c => ({\n    rgb: `rgb(${Math.round(c.color.red)}, ${Math.round(c.color.green)}, ${Math.round(c.color.blue)})`,\n    score: c.score,\n    pixelFraction: c.pixelFraction\n  })) || [],\n  provider: 'google'\n};\n\n// Extract Clarifai results\nconst clarifaiOutputs = clarifaiResult.outputs[0];\nconst clarifaiAnalysis = {\n  concepts: clarifaiOutputs.data.concepts?.map(c => ({\n    name: c.name,\n    value: c.value,\n    confidence: (c.value * 100).toFixed(2) + '%'\n  })) || [],\n  provider: 'clarifai'\n};\n\n// Aggregate and deduplicate labels\nconst allLabels = new Map();\n\n// Add Google labels\ngoogleAnalysis.labels.forEach(l => {\n  const key = l.label.toLowerCase();\n  if (!allLabels.has(key)) {\n    allLabels.set(key, { label: l.label, scores: [] });\n  }\n  allLabels.get(key).scores.push({ provider: 'google', score: l.score });\n});\n\n// Add Clarifai concepts\nclarifaiAnalysis.concepts.forEach(c => {\n  const key = c.name.toLowerCase();\n  if (!allLabels.has(key)) {\n    allLabels.set(key, { label: c.name, scores: [] });\n  }\n  allLabels.get(key).scores.push({ provider: 'clarifai', score: c.value });\n});\n\n// Calculate consensus labels\nconst consensusLabels = Array.from(allLabels.values())\n  .map(item => {\n    const avgScore = item.scores.reduce((sum, s) => sum + s.score, 0) / item.scores.length;\n    return {\n      label: item.label,\n      averageScore: avgScore,\n      confidence: (avgScore * 100).toFixed(2) + '%',\n      agreementCount: item.scores.length,\n      providers: item.scores.map(s => s.provider)\n    };\n  })\n  .sort((a, b) => b.averageScore - a.averageScore)\n  .slice(0, 10);\n\n// Generate summary\nconst summary = {\n  primarySubject: consensusLabels[0]?.label || 'Unknown',\n  confidence: consensusLabels[0]?.confidence || '0%',\n  hasText: !!googleAnalysis.text,\n  hasFaces: googleAnalysis.faces.count > 0,\n  faceCount: googleAnalysis.faces.count,\n  dominantColors: googleAnalysis.colors.slice(0, 3),\n  safeForWork: googleAnalysis.safeSearch?.adult === 'VERY_UNLIKELY' && \n                googleAnalysis.safeSearch?.violence === 'VERY_UNLIKELY',\n  contentRatings: googleAnalysis.safeSearch\n};\n\n// Compile final result\nconst result = {\n  request_id: $input.first().json.request_id,\n  timestamp: new Date().toISOString(),\n  summary: summary,\n  aiDescription: openaiAnalysis.description,\n  consensusLabels: consensusLabels,\n  detailedResults: {\n    openai: openaiAnalysis,\n    google: googleAnalysis,\n    clarifai: clarifaiAnalysis\n  },\n  metadata: {\n    processingTime: Date.now() - new Date($input.first().json.timestamp).getTime(),\n    providersUsed: 3,\n    confidenceThreshold: $input.first().json.confidence_threshold\n  }\n};\n\nreturn { json: result };"
+      },
+      "id": "aggregate-results",
+      "name": "Aggregate Vision Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": {
+          "__rl": true,
+          "value": "vision_analysis_log",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "request_id": "={{ $json.request_id }}",
+            "primary_subject": "={{ $json.summary.primarySubject }}",
+            "confidence": "={{ parseFloat($json.summary.confidence) }}",
+            "has_faces": "={{ $json.summary.hasFaces }}",
+            "face_count": "={{ $json.summary.faceCount }}",
+            "has_text": "={{ $json.summary.hasText }}",
+            "safe_for_work": "={{ $json.summary.safeForWork }}",
+            "processing_time_ms": "={{ $json.metadata.processingTime }}",
+            "results_json": "={{ JSON.stringify($json) }}",
+            "created_at": "NOW()"
+          }
+        }
+      },
+      "id": "save-to-database",
+      "name": "Save Analysis to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1050, 300],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json, null, 2) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "webhook-response",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "content": "## Computer Vision Pipeline\n\n**Capabilities:**\n- Multi-provider analysis (OpenAI, Google, Clarifai)\n- Object detection & localization\n- Facial recognition & emotion detection\n- OCR text extraction\n- Color analysis\n- Safe search filtering\n- Consensus labeling\n\n**Use Cases:**\n- Content moderation\n- Product catalog tagging\n- Document digitization\n- Accessibility (alt text generation)\n- Quality control\n- Security surveillance\n\n**API Endpoint:**\nPOST /webhook/vision-upload\n\n**Request Body:**\n{\n  \"image_url\": \"https://...\",\n  \"tasks\": [\"detect\", \"classify\", \"ocr\"],\n  \"confidence_threshold\": 0.7\n}",
+        "height": 600,
+        "width": 350
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 500]
+    }
+  ],
+  "connections": {
+    "Webhook - Image Upload": {
+      "main": [
+        [
+          {
+            "node": "Parse Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Request": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Vision Analysis",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Vision API",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Clarifai Image Recognition",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Vision Analysis": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Vision Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Vision API": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Vision Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Clarifai Image Recognition": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Vision Results",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Aggregate Vision Results": {
+      "main": [
+        [
+          {
+            "node": "Save Analysis to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Analysis to Database": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["ai", "computer-vision", "image-analysis"],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-11T00:00:00.000Z",
+  "versionId": "1"
+}
