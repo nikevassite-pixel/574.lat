@@ -1,0 +1,140 @@
+{
+  "name": "Infrastructure as Code Provisioning (Terraform)",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "provision-infra",
+        "httpMethod": "POST"
+      },
+      "id": "webhook",
+      "name": "Webhook - Provision Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "command": "=cd /terraform/{{ $json.environment }} && terraform init && terraform plan -out=plan.tfplan"
+      },
+      "id": "terraform-plan",
+      "name": "Terraform - Plan Infrastructure",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Analyze Terraform plan output for potential issues, cost impact, security risks. Return JSON with: risk_level, cost_estimate, security_concerns, recommendations, approval_recommended.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json) }}\n    }\n  ],\n  \"temperature\": 0.3,\n  \"response_format\": { \"type\": \"json_object\" }\n}"
+      },
+      "id": "analyze-plan",
+      "name": "GPT-4 - Analyze Terraform Plan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ JSON.parse($json.choices[0].message.content).approval_recommended }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-approval",
+      "name": "Should Auto-Apply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "command": "=cd /terraform/{{ $('Webhook - Provision Request').item.json.environment }} && terraform apply plan.tfplan"
+      },
+      "id": "terraform-apply",
+      "name": "Terraform - Apply Changes",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1050, 250]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO infrastructure_deployments (environment, terraform_output, ai_analysis, status, applied) VALUES ('{{ $('Webhook - Provision Request').item.json.environment }}', '{{ $('Terraform - Plan Infrastructure').item.json }}', '{{ $('GPT-4 - Analyze Terraform Plan').item.json.choices[0].message.content }}', 'completed', {{ $json ? 'true' : 'false' }}) RETURNING *;"
+      },
+      "id": "log-deployment",
+      "name": "PostgreSQL - Log Deployment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1250, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "sendMessage",
+        "channelId": "={{ $env.SLACK_DEVOPS_CHANNEL }}",
+        "text": "=🏗️ *Infrastructure Provisioning*\\n\\n*Environment:* {{ $('Webhook - Provision Request').item.json.environment }}\\n*Status:* {{ $json ? 'Applied ✅' : 'Planned (awaiting approval) ⏸️' }}\\n\\n*AI Analysis:*\\n{{ JSON.parse($('GPT-4 - Analyze Terraform Plan').item.json.choices[0].message.content).recommendations }}"
+      },
+      "id": "notify",
+      "name": "Slack - Send Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1450, 300],
+      "credentials": {
+        "slackApi": {"id": "10", "name": "Slack API"}
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json"
+      },
+      "id": "response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Provision Request": {
+      "main": [[{"node": "Terraform - Plan Infrastructure", "type": "main", "index": 0}]]
+    },
+    "Terraform - Plan Infrastructure": {
+      "main": [[{"node": "GPT-4 - Analyze Terraform Plan", "type": "main", "index": 0}]]
+    },
+    "GPT-4 - Analyze Terraform Plan": {
+      "main": [[{"node": "Should Auto-Apply?", "type": "main", "index": 0}]]
+    },
+    "Should Auto-Apply?": {
+      "main": [
+        [{"node": "Terraform - Apply Changes", "type": "main", "index": 0}],
+        [{"node": "PostgreSQL - Log Deployment", "type": "main", "index": 0}]
+      ]
+    },
+    "Terraform - Apply Changes": {
+      "main": [[{"node": "PostgreSQL - Log Deployment", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Log Deployment": {
+      "main": [[{"node": "Slack - Send Notification", "type": "main", "index": 0}]]
+    },
+    "Slack - Send Notification": {
+      "main": [[{"node": "Webhook Response", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "devops", "name": "DevOps & CI/CD"}],
+  "versionId": "1.0.0"
+}
