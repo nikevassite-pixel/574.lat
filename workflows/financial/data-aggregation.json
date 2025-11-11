@@ -1,0 +1,469 @@
+{
+  "name": "Financial Data Aggregation and Analysis",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Hourly Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Configure stock symbols and crypto pairs\nconst config = {\n  stocks: ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'NVDA', 'META'],\n  crypto: ['bitcoin', 'ethereum', 'cardano', 'solana', 'polkadot'],\n  forex: ['EURUSD', 'GBPUSD', 'USDJPY'],\n  alphaVantageKey: process.env.ALPHA_VANTAGE_KEY || 'your-api-key',\n  timestamp: new Date().toISOString()\n};\n\nreturn { json: config };"
+      },
+      "id": "configure-symbols",
+      "name": "Configure Symbols",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 500]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "stocks",
+        "options": {}
+      },
+      "id": "split-stocks",
+      "name": "Split Stock Symbols",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://query1.finance.yahoo.com/v8/finance/chart/{{ $json.stocks }}",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "interval",
+              "value": "1h"
+            },
+            {
+              "name": "range",
+              "value": "1d"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "yahoo-finance-api",
+      "name": "Yahoo Finance - Get Quote",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "url": "=https://www.alphavantage.co/query",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "function",
+              "value": "GLOBAL_QUOTE"
+            },
+            {
+              "name": "symbol",
+              "value": "={{ $json.stocks }}"
+            },
+            {
+              "name": "apikey",
+              "value": "={{ $json.alphaVantageKey }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "alpha-vantage-api",
+      "name": "Alpha Vantage - Get Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "crypto",
+        "options": {}
+      },
+      "id": "split-crypto",
+      "name": "Split Crypto Symbols",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [650, 500]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.coingecko.com/api/v3/coins/{{ $json.crypto }}",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "localization",
+              "value": "false"
+            },
+            {
+              "name": "tickers",
+              "value": "false"
+            },
+            {
+              "name": "market_data",
+              "value": "true"
+            },
+            {
+              "name": "community_data",
+              "value": "false"
+            },
+            {
+              "name": "developer_data",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "coingecko-api",
+      "name": "CoinGecko - Get Crypto Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 500]
+    },
+    {
+      "parameters": {
+        "url": "https://api.binance.com/api/v3/ticker/24hr",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "symbol",
+              "value": "={{ $json.crypto.toUpperCase() }}USDT"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "binance-api",
+      "name": "Binance - Get Trading Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process Yahoo Finance stock data\nconst data = $input.first().json;\n\nif (!data.chart || !data.chart.result || !data.chart.result[0]) {\n  return { json: { error: 'Invalid data' } };\n}\n\nconst result = data.chart.result[0];\nconst meta = result.meta;\nconst quote = result.indicators.quote[0];\n\n// Get latest values\nconst latestIndex = quote.close.length - 1;\n\nconst processed = {\n  symbol: meta.symbol,\n  source: 'yahoo_finance',\n  current_price: quote.close[latestIndex],\n  open: quote.open[latestIndex],\n  high: quote.high[latestIndex],\n  low: quote.low[latestIndex],\n  volume: quote.volume[latestIndex],\n  previous_close: meta.previousClose,\n  change: quote.close[latestIndex] - meta.previousClose,\n  change_percent: ((quote.close[latestIndex] - meta.previousClose) / meta.previousClose * 100).toFixed(2),\n  currency: meta.currency,\n  market_state: meta.marketState,\n  timestamp: new Date(meta.regularMarketTime * 1000).toISOString(),\n  retrieved_at: new Date().toISOString()\n};\n\nreturn { json: processed };"
+      },
+      "id": "process-stock-data",
+      "name": "Process Stock Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 250]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process cryptocurrency data from CoinGecko\nconst data = $input.first().json;\n\nif (!data.market_data) {\n  return { json: { error: 'Invalid crypto data' } };\n}\n\nconst marketData = data.market_data;\n\nconst processed = {\n  symbol: data.symbol.toUpperCase(),\n  name: data.name,\n  source: 'coingecko',\n  current_price: marketData.current_price.usd,\n  market_cap: marketData.market_cap.usd,\n  total_volume: marketData.total_volume.usd,\n  high_24h: marketData.high_24h.usd,\n  low_24h: marketData.low_24h.usd,\n  price_change_24h: marketData.price_change_24h,\n  price_change_percentage_24h: marketData.price_change_percentage_24h?.toFixed(2),\n  price_change_percentage_7d: marketData.price_change_percentage_7d?.toFixed(2),\n  price_change_percentage_30d: marketData.price_change_percentage_30d?.toFixed(2),\n  market_cap_rank: data.market_cap_rank,\n  circulating_supply: marketData.circulating_supply,\n  total_supply: marketData.total_supply,\n  ath: marketData.ath.usd,\n  ath_date: marketData.ath_date.usd,\n  atl: marketData.atl.usd,\n  atl_date: marketData.atl_date.usd,\n  last_updated: data.last_updated,\n  retrieved_at: new Date().toISOString()\n};\n\nreturn { json: processed };"
+      },
+      "id": "process-crypto-data",
+      "name": "Process Crypto Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 550]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll"
+      },
+      "id": "merge-all-data",
+      "name": "Merge All Financial Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Perform technical analysis and generate insights\nconst allData = $input.all();\n\nconst stocks = allData.filter(item => item.json.source === 'yahoo_finance');\nconst crypto = allData.filter(item => item.json.source === 'coingecko');\n\n// Calculate market summary\nconst marketSummary = {\n  stocks: {\n    total_count: stocks.length,\n    gainers: stocks.filter(s => parseFloat(s.json.change_percent) > 0).length,\n    losers: stocks.filter(s => parseFloat(s.json.change_percent) < 0).length,\n    top_gainer: stocks.reduce((max, s) => \n      parseFloat(s.json.change_percent) > parseFloat(max.json.change_percent) ? s : max\n    , stocks[0]),\n    top_loser: stocks.reduce((min, s) => \n      parseFloat(s.json.change_percent) < parseFloat(min.json.change_percent) ? s : min\n    , stocks[0]),\n    avg_change: (stocks.reduce((sum, s) => sum + parseFloat(s.json.change_percent), 0) / stocks.length).toFixed(2)\n  },\n  crypto: {\n    total_count: crypto.length,\n    gainers_24h: crypto.filter(c => parseFloat(c.json.price_change_percentage_24h) > 0).length,\n    losers_24h: crypto.filter(c => parseFloat(c.json.price_change_percentage_24h) < 0).length,\n    top_gainer: crypto.reduce((max, c) => \n      parseFloat(c.json.price_change_percentage_24h) > parseFloat(max.json.price_change_percentage_24h) ? c : max\n    , crypto[0]),\n    top_loser: crypto.reduce((min, c) => \n      parseFloat(c.json.price_change_percentage_24h) < parseFloat(min.json.price_change_percentage_24h) ? c : min\n    , crypto[0]),\n    total_market_cap: crypto.reduce((sum, c) => sum + (c.json.market_cap || 0), 0)\n  },\n  timestamp: new Date().toISOString()\n};\n\n// Generate alerts\nconst alerts = [];\n\n// Stock alerts - significant movements\nstocks.forEach(stock => {\n  const changePercent = parseFloat(stock.json.change_percent);\n  if (Math.abs(changePercent) > 5) {\n    alerts.push({\n      type: 'stock_movement',\n      severity: Math.abs(changePercent) > 10 ? 'high' : 'medium',\n      symbol: stock.json.symbol,\n      message: `${stock.json.symbol} ${changePercent > 0 ? 'gained' : 'lost'} ${Math.abs(changePercent)}% today`,\n      current_price: stock.json.current_price,\n      change_percent: changePercent\n    });\n  }\n});\n\n// Crypto alerts - significant movements\ncrypto.forEach(coin => {\n  const changePercent = parseFloat(coin.json.price_change_percentage_24h);\n  if (Math.abs(changePercent) > 10) {\n    alerts.push({\n      type: 'crypto_movement',\n      severity: Math.abs(changePercent) > 20 ? 'high' : 'medium',\n      symbol: coin.json.symbol,\n      name: coin.json.name,\n      message: `${coin.json.name} ${changePercent > 0 ? 'surged' : 'dropped'} ${Math.abs(changePercent).toFixed(2)}% in 24h`,\n      current_price: coin.json.current_price,\n      change_percent: changePercent\n    });\n  }\n});\n\nreturn {\n  json: {\n    summary: marketSummary,\n    alerts: alerts,\n    stocks: stocks.map(s => s.json),\n    crypto: crypto.map(c => c.json),\n    report_generated_at: new Date().toISOString()\n  }\n};"
+      },
+      "id": "analyze-and-summarize",
+      "name": "Analyze and Generate Insights",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 400]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": {
+          "__rl": true,
+          "value": "financial_data",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "symbol": "={{ $json.symbol }}",
+            "source": "={{ $json.source }}",
+            "current_price": "={{ $json.current_price }}",
+            "change_percent": "={{ $json.change_percent || $json.price_change_percentage_24h }}",
+            "volume": "={{ $json.volume || $json.total_volume }}",
+            "data_json": "={{ JSON.stringify($json) }}",
+            "timestamp": "={{ $json.timestamp || $json.last_updated }}",
+            "created_at": "NOW()"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "save-to-database",
+      "name": "Save to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1650, 300],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate HTML email report\nconst data = $input.first().json;\nconst summary = data.summary;\nconst alerts = data.alerts;\n\nconst htmlReport = `\n<!DOCTYPE html>\n<html>\n<head>\n  <style>\n    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }\n    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; text-align: center; }\n    .summary { display: flex; justify-content: space-around; margin: 20px 0; }\n    .summary-box { background: #f4f4f4; padding: 15px; border-radius: 8px; text-align: center; flex: 1; margin: 0 10px; }\n    .summary-box h3 { margin: 0; color: #667eea; }\n    .summary-box .number { font-size: 32px; font-weight: bold; margin: 10px 0; }\n    .positive { color: #22c55e; }\n    .negative { color: #ef4444; }\n    .alerts { margin: 20px; }\n    .alert { padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 4px solid; }\n    .alert.high { background: #fee2e2; border-color: #ef4444; }\n    .alert.medium { background: #fef3c7; border-color: #f59e0b; }\n    .data-table { width: 100%; border-collapse: collapse; margin: 20px 0; }\n    .data-table th { background: #667eea; color: white; padding: 12px; text-align: left; }\n    .data-table td { padding: 10px; border-bottom: 1px solid #ddd; }\n    .data-table tr:hover { background: #f9f9f9; }\n  </style>\n</head>\n<body>\n  <div class=\"header\">\n    <h1>📊 Daily Financial Report</h1>\n    <p>${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>\n  </div>\n  \n  <div style=\"padding: 20px;\">\n    <h2>Market Summary</h2>\n    <div class=\"summary\">\n      <div class=\"summary-box\">\n        <h3>Stocks</h3>\n        <div class=\"number positive\">▲ ${summary.stocks.gainers}</div>\n        <p>Gainers</p>\n        <div class=\"number negative\">▼ ${summary.stocks.losers}</div>\n        <p>Losers</p>\n        <p>Avg Change: <span class=\"${parseFloat(summary.stocks.avg_change) >= 0 ? 'positive' : 'negative'}\">${summary.stocks.avg_change}%</span></p>\n      </div>\n      \n      <div class=\"summary-box\">\n        <h3>Cryptocurrency</h3>\n        <div class=\"number positive\">▲ ${summary.crypto.gainers_24h}</div>\n        <p>24h Gainers</p>\n        <div class=\"number negative\">▼ ${summary.crypto.losers_24h}</div>\n        <p>24h Losers</p>\n        <p>Total Market Cap: $${(summary.crypto.total_market_cap / 1e9).toFixed(2)}B</p>\n      </div>\n    </div>\n    \n    ${alerts.length > 0 ? `\n    <div class=\"alerts\">\n      <h2>🚨 Alerts</h2>\n      ${alerts.map(alert => `\n        <div class=\"alert ${alert.severity}\">\n          <strong>${alert.symbol}${alert.name ? ` (${alert.name})` : ''}</strong>: ${alert.message}<br>\n          Current Price: $${alert.current_price.toFixed(2)}\n        </div>\n      `).join('')}\n    </div>\n    ` : ''}\n    \n    <h2>Top Performers</h2>\n    <table class=\"data-table\">\n      <tr>\n        <th>Symbol</th>\n        <th>Current Price</th>\n        <th>Change</th>\n        <th>Status</th>\n      </tr>\n      <tr>\n        <td><strong>${summary.stocks.top_gainer.json.symbol}</strong></td>\n        <td>$${summary.stocks.top_gainer.json.current_price.toFixed(2)}</td>\n        <td class=\"positive\">+${summary.stocks.top_gainer.json.change_percent}%</td>\n        <td>🔥 Top Stock Gainer</td>\n      </tr>\n      <tr>\n        <td><strong>${summary.crypto.top_gainer.json.symbol.toUpperCase()}</strong></td>\n        <td>$${summary.crypto.top_gainer.json.current_price.toFixed(2)}</td>\n        <td class=\"positive\">+${summary.crypto.top_gainer.json.price_change_percentage_24h}%</td>\n        <td>🚀 Top Crypto Gainer</td>\n      </tr>\n    </table>\n    \n    <p style=\"text-align: center; color: #888; margin-top: 40px;\">\n      Report generated at ${new Date().toLocaleString()}<br>\n      <small>Data sources: Yahoo Finance, Alpha Vantage, CoinGecko, Binance</small>\n    </p>\n  </div>\n</body>\n</html>\n`;\n\nconst textReport = `\nDAILY FINANCIAL REPORT\n${new Date().toLocaleDateString()}\n\nMARKET SUMMARY\n==============\nStocks: ${summary.stocks.gainers} gainers, ${summary.stocks.losers} losers (Avg: ${summary.stocks.avg_change}%)\nCrypto: ${summary.crypto.gainers_24h} gainers, ${summary.crypto.losers_24h} losers (24h)\n\nALERTS (${alerts.length})\n${alerts.map(a => `- ${a.message}`).join('\\n')}\n\nTOP PERFORMERS\n==============\nStock: ${summary.stocks.top_gainer.json.symbol} +${summary.stocks.top_gainer.json.change_percent}%\nCrypto: ${summary.crypto.top_gainer.json.name} +${summary.crypto.top_gainer.json.price_change_percentage_24h}%\n\nGenerated: ${new Date().toLocaleString()}\n`;\n\nreturn {\n  json: {\n    html: htmlReport,\n    text: textReport,\n    subject: `📊 Daily Financial Report - ${alerts.length} Alert${alerts.length !== 1 ? 's' : ''}`,\n    hasAlerts: alerts.length > 0\n  }\n};"
+      },
+      "id": "generate-email-report",
+      "name": "Generate Email Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 400]
+    },
+    {
+      "parameters": {
+        "fromEmail": "reports@yourcompany.com",
+        "toEmail": "investors@yourcompany.com",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "send-email-report",
+      "name": "Send Email Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1850, 400],
+      "credentials": {
+        "smtp": {
+          "id": "14",
+          "name": "SMTP Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "financial-reports-spreadsheet-id",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Daily Data",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "export-to-sheets",
+      "name": "Export to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [1650, 500],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "3",
+          "name": "Google Sheets OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Financial Data Aggregation Tool\\n\\n**Data Sources:**\\n- Yahoo Finance (Stock quotes)\\n- Alpha Vantage (Detailed stock data)\\n- CoinGecko (Cryptocurrency data)\\n- Binance (Trading volumes)\\n\\n**Features:**\\n- Hourly data aggregation\\n- Technical analysis\\n- Alert generation for significant movements\\n- Email reports with HTML formatting\\n- Google Sheets export\\n- Database logging\\n\\n**Alert Thresholds:**\\n- Stocks: ±5% (medium), ±10% (high)\\n- Crypto: ±10% (medium), ±20% (high)\\n\\n**Setup:**\\n- Alpha Vantage API key\\n- SMTP credentials\\n- PostgreSQL database\\n- Google Sheets OAuth2",
+        "height": 650,
+        "width": 350
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 750]
+    }
+  ],
+  "connections": {
+    "Hourly Schedule": {
+      "main": [
+        [
+          {
+            "node": "Configure Symbols",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configure Symbols": {
+      "main": [
+        [
+          {
+            "node": "Split Stock Symbols",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Crypto Symbols",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Stock Symbols": {
+      "main": [
+        [
+          {
+            "node": "Yahoo Finance - Get Quote",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Alpha Vantage - Get Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Yahoo Finance - Get Quote": {
+      "main": [
+        [
+          {
+            "node": "Process Stock Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Crypto Symbols": {
+      "main": [
+        [
+          {
+            "node": "CoinGecko - Get Crypto Data",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Binance - Get Trading Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CoinGecko - Get Crypto Data": {
+      "main": [
+        [
+          {
+            "node": "Process Crypto Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Stock Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Financial Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Crypto Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Financial Data",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge All Financial Data": {
+      "main": [
+        [
+          {
+            "node": "Analyze and Generate Insights",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze and Generate Insights": {
+      "main": [
+        [
+          {
+            "node": "Save to Database",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Generate Email Report",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Export to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Email Report": {
+      "main": [
+        [
+          {
+            "node": "Send Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-11T00:00:00.000Z",
+  "versionId": "1"
+}

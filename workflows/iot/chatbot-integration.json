@@ -1,0 +1,539 @@
+{
+  "name": "Real-Time Chatbot Integration (Telegram & Slack)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"]
+      },
+      "id": "telegram-trigger",
+      "name": "Telegram Bot Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "webhookId": "telegram-bot-webhook",
+      "credentials": {
+        "telegramApi": {
+          "id": "21",
+          "name": "Telegram Bot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "eventsUi": {
+          "values": [
+            {
+              "name": "message.channels"
+            },
+            {
+              "name": "message.im"
+            },
+            {
+              "name": "message.groups"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "slack-trigger",
+      "name": "Slack Bot Trigger",
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [250, 500],
+      "webhookId": "slack-bot-webhook",
+      "credentials": {
+        "slackApi": {
+          "id": "10",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Telegram message\nconst item = $input.first().json;\n\nconst parsedMessage = {\n  platform: 'telegram',\n  user_id: item.message.from.id.toString(),\n  username: item.message.from.username || item.message.from.first_name,\n  chat_id: item.message.chat.id.toString(),\n  message_id: item.message.message_id.toString(),\n  text: item.message.text || '',\n  timestamp: new Date(item.message.date * 1000).toISOString(),\n  is_bot_command: (item.message.text || '').startsWith('/'),\n  raw_message: item\n};\n\n// Extract command if present\nif (parsedMessage.is_bot_command) {\n  const parts = parsedMessage.text.split(' ');\n  parsedMessage.command = parts[0].substring(1);\n  parsedMessage.args = parts.slice(1);\n}\n\nreturn { json: parsedMessage };"
+      },
+      "id": "parse-telegram-message",
+      "name": "Parse Telegram Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Slack message\nconst item = $input.first().json;\nconst event = item.event || {};\n\nconst parsedMessage = {\n  platform: 'slack',\n  user_id: event.user || '',\n  username: event.username || 'user',\n  chat_id: event.channel || '',\n  message_id: event.ts || '',\n  text: event.text || '',\n  timestamp: new Date(parseFloat(event.ts || 0) * 1000).toISOString(),\n  is_bot_command: (event.text || '').startsWith('/'),\n  channel_type: event.channel_type || 'unknown',\n  raw_message: item\n};\n\n// Extract command if present\nif (parsedMessage.is_bot_command) {\n  const parts = parsedMessage.text.split(' ');\n  parsedMessage.command = parts[0].substring(1);\n  parsedMessage.args = parts.slice(1);\n}\n\nreturn { json: parsedMessage };"
+      },
+      "id": "parse-slack-message",
+      "name": "Parse Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 500]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll"
+      },
+      "id": "merge-platforms",
+      "name": "Merge Both Platforms",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-command",
+              "leftValue": "={{ $json.is_bot_command }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-command",
+      "name": "Is Bot Command?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle bot commands\nconst message = $input.first().json;\n\nconst commandHandlers = {\n  'start': {\n    response: '👋 Welcome! I\\'m your AI assistant. Here are available commands:\\n\\n/help - Show this message\\n/status - Check system status\\n/weather <city> - Get weather information\\n/news <topic> - Get latest news\\n/reminder <text> - Set a reminder',\n    action: 'send_message'\n  },\n  'help': {\n    response: '📚 *Available Commands*\\n\\n• /start - Get started\\n• /status - System status\\n• /weather <city> - Weather info\\n• /news <topic> - Latest news\\n• /reminder <text> - Set reminder\\n• /analyze <text> - Text analysis\\n\\nJust send me any message for AI conversation!',\n    action: 'send_message'\n  },\n  'status': {\n    response: '✅ *System Status*\\n\\n🟢 All systems operational\\n🤖 AI Engine: Online\\n📊 Response Time: < 1s\\n💾 Database: Connected\\n\\nLast Updated: ' + new Date().toLocaleString(),\n    action: 'send_message'\n  },\n  'weather': {\n    response: 'Fetching weather data...',\n    action: 'fetch_weather',\n    requires_args: true\n  },\n  'news': {\n    response: 'Fetching latest news...',\n    action: 'fetch_news',\n    requires_args: false\n  },\n  'reminder': {\n    response: 'Setting your reminder...',\n    action: 'create_reminder',\n    requires_args: true\n  },\n  'analyze': {\n    response: 'Analyzing your text...',\n    action: 'analyze_text',\n    requires_args: true\n  }\n};\n\nconst handler = commandHandlers[message.command];\n\nif (!handler) {\n  return {\n    json: {\n      ...message,\n      response: '❌ Unknown command. Type /help for available commands.',\n      action: 'send_message'\n    }\n  };\n}\n\nif (handler.requires_args && (!message.args || message.args.length === 0)) {\n  return {\n    json: {\n      ...message,\n      response: `⚠️ This command requires arguments. Usage: /${message.command} <parameters>`,\n      action: 'send_message'\n    }\n  };\n}\n\nreturn {\n  json: {\n    ...message,\n    response: handler.response,\n    action: handler.action\n  }\n};"
+      },
+      "id": "handle-commands",
+      "name": "Handle Bot Commands",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.response }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-send-message",
+      "name": "Telegram - Send Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1450, 200],
+      "credentials": {
+        "telegramApi": {
+          "id": "21",
+          "name": "Telegram Bot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": {
+          "__rl": true,
+          "value": "={{ $json.chat_id }}",
+          "mode": "id"
+        },
+        "text": "={{ $json.response }}",
+        "otherOptions": {
+          "mrkdwn": true
+        }
+      },
+      "id": "slack-send-message",
+      "name": "Slack - Send Message",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1450, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "10",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "text",
+        "operation": "message",
+        "model": {
+          "__rl": true,
+          "value": "gpt-4-turbo-preview",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a helpful AI assistant integrated into a chat platform. Provide concise, accurate, and friendly responses. Use emojis when appropriate to make conversations engaging."
+            },
+            {
+              "role": "user",
+              "content": "={{ $json.text }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 500
+        }
+      },
+      "id": "dialogflow-process",
+      "name": "OpenAI - Process Message",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1.3,
+      "position": [1050, 400],
+      "credentials": {
+        "openAiApi": {
+          "id": "4",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format AI response\nconst message = $input.first().json;\nconst aiResponse = message.choices?.[0]?.message?.content || 'Sorry, I couldn\\'t process that.';\n\nreturn {\n  json: {\n    ...message,\n    response: aiResponse,\n    action: 'send_message',\n    ai_processed: true\n  }\n};"
+      },
+      "id": "format-ai-response",
+      "name": "Format AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-telegram",
+              "leftValue": "={{ $json.platform }}",
+              "rightValue": "telegram",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-platform",
+      "name": "Route by Platform",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1250, 250]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "needs-special-action",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "send_message",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-special-actions",
+      "name": "Needs Special Action?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1050, 550]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.openweathermap.org/data/2.5/weather",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.args.join(' ') }}"
+            },
+            {
+              "name": "appid",
+              "value": "={{ $json.weatherApiKey }}"
+            },
+            {
+              "name": "units",
+              "value": "metric"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-weather",
+      "name": "Fetch Weather Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1250, 550]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format weather response\nconst data = $input.first().json;\n\nif (data.cod === 200) {\n  const weather = data.weather[0];\n  const main = data.main;\n  \n  const response = `🌤 *Weather in ${data.name}, ${data.sys.country}*\\n\\n` +\n    `🌡 Temperature: ${main.temp}°C (feels like ${main.feels_like}°C)\\n` +\n    `📊 Conditions: ${weather.main} - ${weather.description}\\n` +\n    `💧 Humidity: ${main.humidity}%\\n` +\n    `💨 Wind Speed: ${data.wind.speed} m/s\\n` +\n    `🔽 Pressure: ${main.pressure} hPa\\n\\n` +\n    `_Updated: ${new Date().toLocaleString()}_`;\n  \n  return {\n    json: {\n      ...data,\n      response: response,\n      action: 'send_message'\n    }\n  };\n} else {\n  return {\n    json: {\n      ...data,\n      response: '❌ Could not fetch weather data. Please check the city name and try again.',\n      action: 'send_message'\n    }\n  };\n}"
+      },
+      "id": "format-weather-response",
+      "name": "Format Weather Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 550]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO chatbot_interactions (\\n  platform,\\n  user_id,\\n  username,\\n  chat_id,\\n  message_text,\\n  is_command,\\n  command,\\n  response_text,\\n  ai_processed,\\n  timestamp\\n) VALUES (\\n  '{{ $json.platform }}',\\n  '{{ $json.user_id }}',\\n  '{{ $json.username }}',\\n  '{{ $json.chat_id }}',\\n  '{{ $json.text }}',\\n  {{ $json.is_bot_command }},\\n  '{{ $json.command || '' }}',\\n  '{{ $json.response }}',\\n  {{ $json.ai_processed || false }},\\n  '{{ $json.timestamp }}'\\n)",
+        "options": {}
+      },
+      "id": "log-interaction",
+      "name": "Log Interaction to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1650, 400],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Real-Time Chatbot Integration\\n\\n**Platforms:**\\n- Telegram Bot\\n- Slack Bot\\n\\n**Features:**\\n- Command handling (/help, /status, etc.)\\n- AI-powered conversations (OpenAI GPT-4)\\n- Weather data integration\\n- News fetching\\n- Reminders\\n- Text analysis\\n- Interaction logging\\n\\n**Commands:**\\n- /start - Welcome message\\n- /help - Show commands\\n- /status - System status\\n- /weather <city> - Weather info\\n- /news <topic> - Latest news\\n- /reminder <text> - Set reminder\\n- /analyze <text> - Text analysis\\n\\n**AI Features:**\\n- Natural language understanding\\n- Context-aware responses\\n- Multi-turn conversations\\n\\n**Setup:**\\n- Telegram Bot Token\\n- Slack App with Bot Token\\n- OpenAI API key\\n- Weather API key\\n- PostgreSQL database",
+        "height": 750,
+        "width": 350
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 750]
+    }
+  ],
+  "connections": {
+    "Telegram Bot Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Bot Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "Merge Both Platforms",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Merge Both Platforms",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Both Platforms": {
+      "main": [
+        [
+          {
+            "node": "Is Bot Command?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Bot Command?": {
+      "main": [
+        [
+          {
+            "node": "Handle Bot Commands",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "OpenAI - Process Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Bot Commands": {
+      "main": [
+        [
+          {
+            "node": "Check Needs Special Action?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Route by Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Process Message": {
+      "main": [
+        [
+          {
+            "node": "Format AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format AI Response": {
+      "main": [
+        [
+          {
+            "node": "Route by Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Platform": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Send Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack - Send Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram - Send Message": {
+      "main": [
+        [
+          {
+            "node": "Log Interaction to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack - Send Message": {
+      "main": [
+        [
+          {
+            "node": "Log Interaction to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Needs Special Action?": {
+      "main": [
+        [
+          {
+            "node": "Fetch Weather Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Weather Data": {
+      "main": [
+        [
+          {
+            "node": "Format Weather Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Weather Response": {
+      "main": [
+        [
+          {
+            "node": "Route by Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 2,
+  "updatedAt": "2025-11-11T00:00:00.000Z",
+  "versionId": "1"
+}

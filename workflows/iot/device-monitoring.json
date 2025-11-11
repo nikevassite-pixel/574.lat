@@ -1,0 +1,425 @@
+{
+  "name": "IoT Device Monitoring System",
+  "nodes": [
+    {
+      "parameters": {
+        "protocol": "mqtt",
+        "topic": "sensors/#",
+        "options": {
+          "qos": 1,
+          "jsonParseBody": true
+        }
+      },
+      "id": "mqtt-trigger",
+      "name": "MQTT Broker - Subscribe",
+      "type": "n8n-nodes-base.mqttTrigger",
+      "typeVersion": 1,
+      "position": [250, 400],
+      "credentials": {
+        "mqtt": {
+          "id": "15",
+          "name": "MQTT Broker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse and validate sensor data\nconst message = $input.first().json;\n\nconst parseTopicParts = (topic) => {\n  const parts = topic.split('/');\n  return {\n    category: parts[1] || 'unknown',\n    location: parts[2] || 'unknown',\n    deviceId: parts[3] || 'unknown',\n    metric: parts[4] || 'data'\n  };\n};\n\nconst topicParts = parseTopicParts(message.topic);\n\nconst parsedData = {\n  device_id: topicParts.deviceId,\n  location: topicParts.location,\n  category: topicParts.category,\n  metric_type: topicParts.metric,\n  raw_value: message.payload,\n  timestamp: message.timestamp || new Date().toISOString(),\n  received_at: new Date().toISOString()\n};\n\n// Parse payload based on type\nif (typeof message.payload === 'object') {\n  parsedData.temperature = message.payload.temperature;\n  parsedData.humidity = message.payload.humidity;\n  parsedData.pressure = message.payload.pressure;\n  parsedData.battery_level = message.payload.battery;\n  parsedData.signal_strength = message.payload.rssi;\n} else {\n  parsedData.value = message.payload;\n}\n\nreturn { json: parsedData };"
+      },
+      "id": "parse-sensor-data",
+      "name": "Parse Sensor Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate sensor readings and detect anomalies\nconst data = $input.first().json;\n\n// Define normal ranges\nconst thresholds = {\n  temperature: { min: -10, max: 50, critical_low: 0, critical_high: 40 },\n  humidity: { min: 0, max: 100, critical_low: 20, critical_high: 80 },\n  pressure: { min: 950, max: 1050, critical_low: 980, critical_high: 1030 },\n  battery_level: { min: 0, max: 100, critical_low: 20, critical_high: 100 }\n};\n\nconst alerts = [];\nconst status = {\n  overall: 'normal',\n  issues: []\n};\n\n// Check each metric\nObject.keys(thresholds).forEach(metric => {\n  if (data[metric] !== undefined) {\n    const value = parseFloat(data[metric]);\n    const threshold = thresholds[metric];\n    \n    if (value < threshold.min || value > threshold.max) {\n      status.overall = 'error';\n      status.issues.push(`${metric} out of bounds: ${value}`);\n      alerts.push({\n        severity: 'critical',\n        metric: metric,\n        value: value,\n        message: `${metric} reading ${value} is outside acceptable range [${threshold.min}, ${threshold.max}]`\n      });\n    } else if (value < threshold.critical_low || value > threshold.critical_high) {\n      if (status.overall === 'normal') status.overall = 'warning';\n      status.issues.push(`${metric} in warning zone: ${value}`);\n      alerts.push({\n        severity: 'warning',\n        metric: metric,\n        value: value,\n        message: `${metric} reading ${value} is in warning zone`\n      });\n    }\n  }\n});\n\n// Battery alert\nif (data.battery_level && data.battery_level < 20) {\n  alerts.push({\n    severity: 'warning',\n    metric: 'battery',\n    value: data.battery_level,\n    message: `Low battery: ${data.battery_level}%`\n  });\n}\n\nconst validatedData = {\n  ...data,\n  status: status.overall,\n  issues: status.issues,\n  alerts: alerts,\n  has_alerts: alerts.length > 0,\n  validated_at: new Date().toISOString()\n};\n\nreturn { json: validatedData };"
+      },
+      "id": "validate-and-detect-anomalies",
+      "name": "Validate and Detect Anomalies",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-alerts",
+              "leftValue": "={{ $json.has_alerts }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-alerts",
+      "name": "Check for Alerts",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://your-influxdb-instance.com/api/v2/write",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "org",
+              "value": "your-org"
+            },
+            {
+              "name": "bucket",
+              "value": "iot-sensors"
+            },
+            {
+              "name": "precision",
+              "value": "ms"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Token {{ $json.influxdbToken }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawBody": "=sensor_data,device_id={{ $json.device_id }},location={{ $json.location }},category={{ $json.category }} temperature={{ $json.temperature }},humidity={{ $json.humidity }},pressure={{ $json.pressure }},battery_level={{ $json.battery_level }},status=\"{{ $json.status }}\" {{ new Date($json.timestamp).getTime() }}",
+        "options": {}
+      },
+      "id": "influxdb-write",
+      "name": "InfluxDB - Write Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 500],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "16",
+          "name": "InfluxDB Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "alerts",
+        "options": {}
+      },
+      "id": "split-alerts",
+      "name": "Split Alerts",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format alert notification\nconst data = $input.first().json;\nconst alert = data.alerts;\n\nconst severityEmoji = {\n  'critical': '🔴',\n  'warning': '🟡',\n  'info': 'ℹ️'\n};\n\nconst notification = {\n  title: `${severityEmoji[alert.severity]} IoT Device Alert`,\n  message: `*Device:* ${data.device_id}\\n*Location:* ${data.location}\\n*Alert:* ${alert.message}\\n*Status:* ${data.status}\\n*Time:* ${new Date(data.timestamp).toLocaleString()}`,\n  severity: alert.severity,\n  device_id: data.device_id,\n  location: data.location,\n  metric: alert.metric,\n  value: alert.value\n};\n\nreturn { json: notification };"
+      },
+      "id": "format-notification",
+      "name": "Format Alert Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": {
+          "__rl": true,
+          "value": "iot-alerts",
+          "mode": "name"
+        },
+        "text": "={{ $json.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack-send-alert",
+      "name": "Slack - Send Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1450, 150],
+      "credentials": {
+        "slackApi": {
+          "id": "10",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-critical",
+              "leftValue": "={{ $json.severity }}",
+              "rightValue": "critical",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-critical",
+      "name": "Check if Critical",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1450, 250]
+    },
+    {
+      "parameters": {
+        "url": "https://api.pagerduty.com/incidents",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Token token={{ $json.pagerdutyToken }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.pagerduty+json;version=2"
+            },
+            {
+              "name": "From",
+              "value": "iot-system@yourcompany.com"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\\n  incident: {\\n    type: 'incident',\\n    title: `Critical IoT Alert: ${$json.device_id}`,\\n    service: {\\n      id: 'your-service-id',\\n      type: 'service_reference'\\n    },\\n    urgency: 'high',\\n    body: {\\n      type: 'incident_body',\\n      details: $json.message\\n    }\\n  }\\n} }}",
+        "options": {}
+      },
+      "id": "pagerduty-create-incident",
+      "name": "PagerDuty - Create Incident",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1650, 250],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "17",
+          "name": "PagerDuty API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Trigger automated response actions\nconst data = $input.first().json;\nconst actions = [];\n\n// Define automated responses based on conditions\nif (data.temperature && data.temperature > 35) {\n  actions.push({\n    action_type: 'mqtt_publish',\n    topic: `actuators/${data.location}/${data.device_id}/cooling`,\n    payload: { command: 'activate', intensity: 'high' },\n    reason: 'High temperature detected'\n  });\n}\n\nif (data.humidity && data.humidity > 70) {\n  actions.push({\n    action_type: 'mqtt_publish',\n    topic: `actuators/${data.location}/${data.device_id}/dehumidifier`,\n    payload: { command: 'activate' },\n    reason: 'High humidity detected'\n  });\n}\n\nif (data.battery_level && data.battery_level < 15) {\n  actions.push({\n    action_type: 'mqtt_publish',\n    topic: `devices/${data.device_id}/power`,\n    payload: { command: 'low_power_mode', enabled: true },\n    reason: 'Critical battery level'\n  });\n}\n\nreturn actions.map(action => ({ json: action }));"
+      },
+      "id": "determine-actions",
+      "name": "Determine Automated Actions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 350]
+    },
+    {
+      "parameters": {
+        "protocol": "mqtt",
+        "topic": "={{ $json.topic }}",
+        "message": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "qos": 1
+        }
+      },
+      "id": "mqtt-publish-action",
+      "name": "MQTT - Publish Action",
+      "type": "n8n-nodes-base.mqtt",
+      "typeVersion": 1,
+      "position": [1250, 350],
+      "credentials": {
+        "mqtt": {
+          "id": "15",
+          "name": "MQTT Broker"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO iot_sensor_data (\\n  device_id,\\n  location,\\n  category,\\n  temperature,\\n  humidity,\\n  pressure,\\n  battery_level,\\n  status,\\n  alerts_count,\\n  timestamp,\\n  received_at\\n) VALUES (\\n  '{{ $json.device_id }}',\\n  '{{ $json.location }}',\\n  '{{ $json.category }}',\\n  {{ $json.temperature || 'NULL' }},\\n  {{ $json.humidity || 'NULL' }},\\n  {{ $json.pressure || 'NULL' }},\\n  {{ $json.battery_level || 'NULL' }},\\n  '{{ $json.status }}',\\n  {{ $json.alerts.length }},\\n  '{{ $json.timestamp }}',\\n  NOW()\\n)",
+        "options": {}
+      },
+      "id": "save-to-database",
+      "name": "Save to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1050, 500],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## IoT Device Monitoring System\\n\\n**Features:**\\n- Real-time MQTT message processing\\n- Anomaly detection with thresholds\\n- Multi-level alerting (warning/critical)\\n- InfluxDB time-series storage\\n- Automated response actions\\n- Slack notifications\\n- PagerDuty incident creation\\n- PostgreSQL logging\\n\\n**Supported Metrics:**\\n- Temperature (-10°C to 50°C)\\n- Humidity (0% to 100%)\\n- Pressure (950 to 1050 hPa)\\n- Battery Level (0% to 100%)\\n- Signal Strength (RSSI)\\n\\n**MQTT Topic Format:**\\nsensors/{category}/{location}/{device_id}/{metric}\\n\\n**Setup:**\\n- MQTT Broker configuration\\n- InfluxDB instance\\n- Slack workspace\\n- PagerDuty account\\n- PostgreSQL database",
+        "height": 700,
+        "width": 350
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 650]
+    }
+  ],
+  "connections": {
+    "MQTT Broker - Subscribe": {
+      "main": [
+        [
+          {
+            "node": "Parse Sensor Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Sensor Data": {
+      "main": [
+        [
+          {
+            "node": "Validate and Detect Anomalies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate and Detect Anomalies": {
+      "main": [
+        [
+          {
+            "node": "Check for Alerts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "InfluxDB - Write Data",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Alerts": {
+      "main": [
+        [
+          {
+            "node": "Split Alerts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Determine Automated Actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Alerts": {
+      "main": [
+        [
+          {
+            "node": "Format Alert Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Alert Notification": {
+      "main": [
+        [
+          {
+            "node": "Slack - Send Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check if Critical",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Critical": {
+      "main": [
+        [
+          {
+            "node": "PagerDuty - Create Incident",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Automated Actions": {
+      "main": [
+        [
+          {
+            "node": "MQTT - Publish Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-11T00:00:00.000Z",
+  "versionId": "1"
+}

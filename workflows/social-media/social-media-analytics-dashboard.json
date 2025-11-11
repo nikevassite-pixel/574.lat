@@ -1,0 +1,365 @@
+{
+  "name": "Social Media Analytics Dashboard",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "tweet",
+        "operation": "search",
+        "searchText": "={{ $json.searchQuery }}",
+        "returnAll": false,
+        "limit": 100,
+        "additionalFields": {
+          "tweetMode": "extended",
+          "includeEntities": true
+        }
+      },
+      "id": "twitter-search",
+      "name": "Twitter API - Search",
+      "type": "n8n-nodes-base.twitter",
+      "typeVersion": 1,
+      "position": [450, 200],
+      "credentials": {
+        "twitterOAuth2Api": {
+          "id": "1",
+          "name": "Twitter OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://graph.facebook.com/v18.0/me/insights",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "metric",
+              "value": "page_impressions,page_engaged_users,page_post_engagements"
+            },
+            {
+              "name": "period",
+              "value": "day"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "facebook-insights",
+      "name": "Facebook API - Insights",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "2",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://graph.facebook.com/v18.0/me",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "instagram_business_account"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-instagram-account",
+      "name": "Get Instagram Account",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 400],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "2",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v18.0/{{ $json.instagram_business_account.id }}/insights",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "metric",
+              "value": "impressions,reach,follower_count,profile_views"
+            },
+            {
+              "name": "period",
+              "value": "day"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "instagram-insights",
+      "name": "Instagram API - Insights",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 400],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "2",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process Twitter Data\nconst twitterData = $input.first().json;\nconst processedTwitter = {\n  platform: 'Twitter',\n  timestamp: new Date().toISOString(),\n  metrics: {\n    tweets_analyzed: twitterData.length || 0,\n    total_likes: 0,\n    total_retweets: 0,\n    total_replies: 0,\n    engagement_rate: 0\n  }\n};\n\nif (Array.isArray(twitterData)) {\n  twitterData.forEach(tweet => {\n    processedTwitter.metrics.total_likes += tweet.favorite_count || 0;\n    processedTwitter.metrics.total_retweets += tweet.retweet_count || 0;\n    processedTwitter.metrics.total_replies += tweet.reply_count || 0;\n  });\n  \n  const totalEngagements = processedTwitter.metrics.total_likes + \n                           processedTwitter.metrics.total_retweets + \n                           processedTwitter.metrics.total_replies;\n  processedTwitter.metrics.engagement_rate = \n    (totalEngagements / processedTwitter.metrics.tweets_analyzed * 100).toFixed(2);\n}\n\nreturn { json: processedTwitter };"
+      },
+      "id": "process-twitter-data",
+      "name": "Process Twitter Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process Facebook Data\nconst facebookData = $input.first().json;\nconst processedFacebook = {\n  platform: 'Facebook',\n  timestamp: new Date().toISOString(),\n  metrics: {\n    page_impressions: 0,\n    engaged_users: 0,\n    post_engagements: 0,\n    engagement_rate: 0\n  }\n};\n\nif (facebookData.data && Array.isArray(facebookData.data)) {\n  facebookData.data.forEach(metric => {\n    if (metric.name === 'page_impressions') {\n      processedFacebook.metrics.page_impressions = metric.values[0]?.value || 0;\n    } else if (metric.name === 'page_engaged_users') {\n      processedFacebook.metrics.engaged_users = metric.values[0]?.value || 0;\n    } else if (metric.name === 'page_post_engagements') {\n      processedFacebook.metrics.post_engagements = metric.values[0]?.value || 0;\n    }\n  });\n  \n  if (processedFacebook.metrics.page_impressions > 0) {\n    processedFacebook.metrics.engagement_rate = \n      (processedFacebook.metrics.post_engagements / processedFacebook.metrics.page_impressions * 100).toFixed(2);\n  }\n}\n\nreturn { json: processedFacebook };"
+      },
+      "id": "process-facebook-data",
+      "name": "Process Facebook Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process Instagram Data\nconst instagramData = $input.first().json;\nconst processedInstagram = {\n  platform: 'Instagram',\n  timestamp: new Date().toISOString(),\n  metrics: {\n    impressions: 0,\n    reach: 0,\n    follower_count: 0,\n    profile_views: 0,\n    engagement_rate: 0\n  }\n};\n\nif (instagramData.data && Array.isArray(instagramData.data)) {\n  instagramData.data.forEach(metric => {\n    if (metric.name === 'impressions') {\n      processedInstagram.metrics.impressions = metric.values[0]?.value || 0;\n    } else if (metric.name === 'reach') {\n      processedInstagram.metrics.reach = metric.values[0]?.value || 0;\n    } else if (metric.name === 'follower_count') {\n      processedInstagram.metrics.follower_count = metric.values[0]?.value || 0;\n    } else if (metric.name === 'profile_views') {\n      processedInstagram.metrics.profile_views = metric.values[0]?.value || 0;\n    }\n  });\n  \n  if (processedInstagram.metrics.impressions > 0) {\n    processedInstagram.metrics.engagement_rate = \n      (processedInstagram.metrics.profile_views / processedInstagram.metrics.impressions * 100).toFixed(2);\n  }\n}\n\nreturn { json: processedInstagram };"
+      },
+      "id": "process-instagram-data",
+      "name": "Process Instagram Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll"
+      },
+      "id": "merge-all-data",
+      "name": "Merge All Platform Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine and format data for Google Sheets\nconst allData = $input.all();\nconst formattedRows = [];\n\nallData.forEach(item => {\n  const data = item.json;\n  formattedRows.push({\n    timestamp: data.timestamp,\n    platform: data.platform,\n    ...data.metrics\n  });\n});\n\n// Calculate aggregate metrics\nconst aggregate = {\n  timestamp: new Date().toISOString(),\n  platform: 'AGGREGATE',\n  total_impressions: 0,\n  total_engagements: 0,\n  average_engagement_rate: 0\n};\n\nlet totalEngagementRate = 0;\nlet platformCount = 0;\n\nformattedRows.forEach(row => {\n  if (row.page_impressions) aggregate.total_impressions += row.page_impressions;\n  if (row.impressions) aggregate.total_impressions += row.impressions;\n  if (row.post_engagements) aggregate.total_engagements += row.post_engagements;\n  if (row.engagement_rate) {\n    totalEngagementRate += parseFloat(row.engagement_rate);\n    platformCount++;\n  }\n});\n\nif (platformCount > 0) {\n  aggregate.average_engagement_rate = (totalEngagementRate / platformCount).toFixed(2);\n}\n\nformattedRows.push(aggregate);\n\nreturn formattedRows.map(row => ({ json: row }));"
+      },
+      "id": "format-for-sheets",
+      "name": "Format for Google Sheets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $json.spreadsheetId }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Analytics",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "valueInputMode": "RAW"
+        }
+      },
+      "id": "google-sheets-append",
+      "name": "Google Sheets - Append Data",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [1450, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "3",
+          "name": "Google Sheets OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Social Media Analytics Dashboard\\n\\nThis workflow collects engagement metrics from:\\n- Twitter/X\\n- Facebook\\n- Instagram\\n\\nData is processed and exported to Google Sheets every 6 hours.\\n\\n**Setup Requirements:**\\n1. Configure Twitter OAuth2 credentials\\n2. Configure Facebook Graph API credentials\\n3. Configure Google Sheets OAuth2 credentials\\n4. Update spreadsheet ID in the workflow\\n5. Ensure proper API permissions are granted",
+        "height": 400,
+        "width": 350
+      },
+      "id": "sticky-note-1",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 460]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Twitter API - Search",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Facebook API - Insights",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Instagram Account",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Twitter API - Search": {
+      "main": [
+        [
+          {
+            "node": "Process Twitter Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Facebook API - Insights": {
+      "main": [
+        [
+          {
+            "node": "Process Facebook Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Instagram Account": {
+      "main": [
+        [
+          {
+            "node": "Instagram API - Insights",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Instagram API - Insights": {
+      "main": [
+        [
+          {
+            "node": "Process Instagram Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Twitter Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Platform Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Facebook Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Platform Data",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Process Instagram Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Platform Data",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge All Platform Data": {
+      "main": [
+        [
+          {
+            "node": "Format for Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Append Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-11T00:00:00.000Z",
+  "versionId": "1"
+}

@@ -1,0 +1,475 @@
+{
+  "name": "AI-Powered Content Generation Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 4
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.feedUrl }}",
+        "options": {}
+      },
+      "id": "rss-feed-reader",
+      "name": "RSS Feed Reader",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter articles published in the last 4 hours\nconst items = $input.all();\nconst fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);\n\nconst recentArticles = items.filter(item => {\n  const pubDate = new Date(item.json.pubDate || item.json.isoDate);\n  return pubDate > fourHoursAgo;\n});\n\nreturn recentArticles;"
+      },
+      "id": "filter-recent-articles",
+      "name": "Filter Recent Articles",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "url": "={{ $json.link }}",
+        "options": {
+          "cleanupHtml": true,
+          "removeScripts": true,
+          "removeStyles": true
+        }
+      },
+      "id": "extract-article-content",
+      "name": "Extract Article Content",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "text",
+        "operation": "message",
+        "model": {
+          "__rl": true,
+          "value": "gpt-4-turbo-preview",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a professional content writer. Your task is to summarize and rewrite articles in an engaging, SEO-friendly style while maintaining accuracy and adding value."
+            },
+            {
+              "role": "user",
+              "content": "=Please analyze this article and create:\\n\\n1. A compelling headline (60 characters max)\\n2. A meta description (155 characters max)\\n3. A 300-word rewritten article that is unique, engaging, and SEO-optimized\\n4. 5 relevant tags\\n\\nOriginal Article Title: {{ $json.title }}\\n\\nOriginal Content:\\n{{ $json.content }}\\n\\nFormat your response as JSON with keys: headline, metaDescription, content, tags"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 2000
+        }
+      },
+      "id": "openai-rewrite",
+      "name": "OpenAI - Rewrite Content",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1.3,
+      "position": [1050, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "4",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse OpenAI response and structure data\nconst item = $input.first().json;\nconst aiResponse = item.choices[0].message.content;\n\n// Try to parse JSON response\nlet parsedContent;\ntry {\n  parsedContent = JSON.parse(aiResponse);\n} catch (e) {\n  // If not JSON, extract manually\n  parsedContent = {\n    headline: item.title || 'Generated Content',\n    metaDescription: aiResponse.substring(0, 155),\n    content: aiResponse,\n    tags: ['AI Generated', 'Content']\n  };\n}\n\nconst structuredData = {\n  originalUrl: item.link,\n  originalTitle: item.title,\n  generatedHeadline: parsedContent.headline,\n  metaDescription: parsedContent.metaDescription,\n  content: parsedContent.content,\n  tags: parsedContent.tags || [],\n  generatedAt: new Date().toISOString(),\n  scheduledPublishTime: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(), // 2 hours from now\n  status: 'pending'\n};\n\nreturn { json: structuredData };"
+      },
+      "id": "structure-content",
+      "name": "Structure Content Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "image",
+        "operation": "generate",
+        "prompt": "={{ 'Create a professional blog featured image for an article titled: ' + $json.generatedHeadline }}",
+        "options": {
+          "size": "1024x1024",
+          "quality": "standard",
+          "style": "vivid"
+        }
+      },
+      "id": "generate-featured-image",
+      "name": "Generate Featured Image",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1.3,
+      "position": [1450, 200],
+      "credentials": {
+        "openAiApi": {
+          "id": "4",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.data[0].url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "download-image",
+      "name": "Download Generated Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1650, 200]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "merge-content-image",
+      "name": "Merge Content and Image",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1850, 250]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.wordpressUrl }}/wp-json/wp/v2/posts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "title",
+              "value": "={{ $json.generatedHeadline }}"
+            },
+            {
+              "name": "content",
+              "value": "={{ $json.content }}"
+            },
+            {
+              "name": "excerpt",
+              "value": "={{ $json.metaDescription }}"
+            },
+            {
+              "name": "status",
+              "value": "draft"
+            },
+            {
+              "name": "meta",
+              "value": "={{ { 'description': $json.metaDescription } }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wordpress-create-post",
+      "name": "WordPress - Create Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2050, 250],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "5",
+          "name": "WordPress Basic Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.medium.com/v1/users/{{ $json.mediumUserId }}/posts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.mediumToken }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "title",
+              "value": "={{ $json.generatedHeadline }}"
+            },
+            {
+              "name": "contentFormat",
+              "value": "html"
+            },
+            {
+              "name": "content",
+              "value": "={{ $json.content }}"
+            },
+            {
+              "name": "tags",
+              "value": "={{ $json.tags }}"
+            },
+            {
+              "name": "publishStatus",
+              "value": "draft"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "medium-create-post",
+      "name": "Medium - Create Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2050, 350],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6",
+          "name": "Medium API Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": {
+          "__rl": true,
+          "value": "content_pipeline",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "original_url": "={{ $json.originalUrl }}",
+            "original_title": "={{ $json.originalTitle }}",
+            "generated_headline": "={{ $json.generatedHeadline }}",
+            "content": "={{ $json.content }}",
+            "wordpress_post_id": "={{ $json.wordpress_id }}",
+            "medium_post_id": "={{ $json.medium_id }}",
+            "status": "={{ $json.status }}",
+            "created_at": "={{ $json.generatedAt }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "save-to-database",
+      "name": "Save to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2250, 300],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## AI-Powered Content Generation Pipeline\\n\\nThis workflow:\\n1. Fetches RSS feeds\\n2. Filters recent articles\\n3. Uses OpenAI GPT-4 to rewrite content\\n4. Generates featured images with DALL-E\\n5. Publishes to WordPress and Medium as drafts\\n6. Logs to database\\n\\n**Setup:**\\n- Configure OpenAI API credentials\\n- Set up WordPress REST API\\n- Configure Medium API token\\n- Create PostgreSQL database table",
+        "height": 450,
+        "width": 350
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 480]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "value1": "={{ { feedUrl: 'https://techcrunch.com/feed/', wordpressUrl: 'https://yourblog.com', mediumUserId: 'your-medium-user-id', mediumToken: 'your-medium-token' } }}"
+      },
+      "id": "set-config",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [250, 300]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "RSS Feed Reader",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RSS Feed Reader": {
+      "main": [
+        [
+          {
+            "node": "Filter Recent Articles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Recent Articles": {
+      "main": [
+        [
+          {
+            "node": "Extract Article Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Article Content": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Rewrite Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Rewrite Content": {
+      "main": [
+        [
+          {
+            "node": "Structure Content Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structure Content Data": {
+      "main": [
+        [
+          {
+            "node": "Generate Featured Image",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Content and Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Featured Image": {
+      "main": [
+        [
+          {
+            "node": "Download Generated Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Generated Image": {
+      "main": [
+        [
+          {
+            "node": "Merge Content and Image",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Content and Image": {
+      "main": [
+        [
+          {
+            "node": "WordPress - Create Post",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Medium - Create Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WordPress - Create Post": {
+      "main": [
+        [
+          {
+            "node": "Save to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Medium - Create Post": {
+      "main": [
+        [
+          {
+            "node": "Save to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-11T00:00:00.000Z",
+  "versionId": "1"
+}

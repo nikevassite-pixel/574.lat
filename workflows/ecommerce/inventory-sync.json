@@ -1,0 +1,543 @@
+{
+  "name": "E-commerce Inventory Sync with Low Stock Alerts",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "resource": "product",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "fields": "id,title,variants,inventory_quantity"
+        }
+      },
+      "id": "shopify-get-products",
+      "name": "Shopify - Get All Products",
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [450, 300],
+      "credentials": {
+        "shopifyApi": {
+          "id": "8",
+          "name": "Shopify API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.woocommerceUrl }}/wp-json/wc/v3/products",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "per_page",
+              "value": "100"
+            },
+            {
+              "name": "page",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "woocommerce-get-products",
+      "name": "WooCommerce - Get Products",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 400],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "9",
+          "name": "WooCommerce API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT product_id, sku, stock_quantity, warehouse_location, last_updated FROM inventory",
+        "options": {}
+      },
+      "id": "database-get-inventory",
+      "name": "Database - Get Current Inventory",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [450, 500],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize Shopify product data\nconst items = $input.all();\nconst normalized = [];\n\nitems.forEach(item => {\n  const product = item.json;\n  \n  if (product.variants && Array.isArray(product.variants)) {\n    product.variants.forEach(variant => {\n      normalized.push({\n        platform: 'shopify',\n        product_id: product.id.toString(),\n        variant_id: variant.id.toString(),\n        sku: variant.sku || `SHOPIFY-${product.id}-${variant.id}`,\n        title: `${product.title} - ${variant.title}`,\n        stock_quantity: variant.inventory_quantity || 0,\n        price: parseFloat(variant.price || 0),\n        synced_at: new Date().toISOString()\n      });\n    });\n  }\n});\n\nreturn normalized.map(item => ({ json: item }));"
+      },
+      "id": "normalize-shopify-data",
+      "name": "Normalize Shopify Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize WooCommerce product data\nconst items = $input.all();\nconst normalized = [];\n\nitems.forEach(item => {\n  const product = item.json;\n  \n  normalized.push({\n    platform: 'woocommerce',\n    product_id: product.id.toString(),\n    variant_id: product.id.toString(),\n    sku: product.sku || `WOO-${product.id}`,\n    title: product.name,\n    stock_quantity: product.stock_quantity || 0,\n    price: parseFloat(product.price || 0),\n    synced_at: new Date().toISOString()\n  });\n  \n  // Handle variations\n  if (product.variations && Array.isArray(product.variations)) {\n    product.variations.forEach(varId => {\n      normalized.push({\n        platform: 'woocommerce',\n        product_id: product.id.toString(),\n        variant_id: varId.toString(),\n        sku: `WOO-${product.id}-${varId}`,\n        title: `${product.name} - Variation ${varId}`,\n        stock_quantity: 0,\n        price: parseFloat(product.price || 0),\n        synced_at: new Date().toISOString()\n      });\n    });\n  }\n});\n\nreturn normalized.map(item => ({ json: item }));"
+      },
+      "id": "normalize-woocommerce-data",
+      "name": "Normalize WooCommerce Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll"
+      },
+      "id": "merge-all-sources",
+      "name": "Merge All Inventory Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Consolidate inventory across platforms by SKU\nconst allItems = $input.all();\nconst inventoryMap = new Map();\nconst databaseInventory = new Map();\n\n// Separate database records\nallItems.forEach(item => {\n  const data = item.json;\n  \n  if (data.warehouse_location) {\n    // This is from database\n    databaseInventory.set(data.sku, data);\n  } else {\n    // This is from e-commerce platforms\n    const sku = data.sku;\n    \n    if (!inventoryMap.has(sku)) {\n      inventoryMap.set(sku, {\n        sku: sku,\n        title: data.title,\n        platforms: {},\n        total_stock: 0,\n        price: data.price,\n        last_synced: data.synced_at\n      });\n    }\n    \n    const inventory = inventoryMap.get(sku);\n    inventory.platforms[data.platform] = {\n      product_id: data.product_id,\n      variant_id: data.variant_id,\n      stock: data.stock_quantity\n    };\n    inventory.total_stock += data.stock_quantity;\n  }\n});\n\n// Create consolidated records with sync recommendations\nconst consolidated = [];\nconst lowStockAlerts = [];\nconst syncActions = [];\n\ninventoryMap.forEach((inventory, sku) => {\n  const dbRecord = databaseInventory.get(sku);\n  const masterStock = dbRecord ? dbRecord.stock_quantity : inventory.total_stock;\n  \n  // Check if sync needed\n  Object.entries(inventory.platforms).forEach(([platform, data]) => {\n    if (data.stock !== masterStock) {\n      syncActions.push({\n        sku: sku,\n        platform: platform,\n        product_id: data.product_id,\n        variant_id: data.variant_id,\n        current_stock: data.stock,\n        target_stock: masterStock,\n        action: 'update'\n      });\n    }\n  });\n  \n  // Low stock alert (threshold: 10)\n  if (masterStock < 10) {\n    lowStockAlerts.push({\n      sku: sku,\n      title: inventory.title,\n      current_stock: masterStock,\n      platforms: Object.keys(inventory.platforms),\n      alert_level: masterStock === 0 ? 'CRITICAL' : 'WARNING'\n    });\n  }\n  \n  consolidated.push({\n    sku: sku,\n    title: inventory.title,\n    master_stock: masterStock,\n    platforms: inventory.platforms,\n    price: inventory.price,\n    needs_sync: syncActions.filter(a => a.sku === sku).length > 0,\n    low_stock: masterStock < 10,\n    synced_at: new Date().toISOString()\n  });\n});\n\nreturn [{\n  json: {\n    consolidated: consolidated,\n    syncActions: syncActions,\n    lowStockAlerts: lowStockAlerts,\n    summary: {\n      total_products: consolidated.length,\n      products_needing_sync: syncActions.length,\n      low_stock_items: lowStockAlerts.length,\n      critical_items: lowStockAlerts.filter(a => a.alert_level === 'CRITICAL').length\n    }\n  }\n}];"
+      },
+      "id": "consolidate-inventory",
+      "name": "Consolidate and Analyze Inventory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-sync-actions",
+              "leftValue": "={{ $json.syncActions.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-sync-needed",
+      "name": "Check if Sync Needed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "syncActions",
+        "options": {}
+      },
+      "id": "split-sync-actions",
+      "name": "Split Sync Actions",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-shopify",
+              "leftValue": "={{ $json.platform }}",
+              "rightValue": "shopify",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-by-platform",
+      "name": "Route by Platform",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "resource": "product",
+        "operation": "update",
+        "productId": "={{ $json.variant_id }}",
+        "updateFields": {
+          "inventory_quantity": "={{ $json.target_stock }}"
+        }
+      },
+      "id": "shopify-update-inventory",
+      "name": "Shopify - Update Inventory",
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [1850, 200],
+      "credentials": {
+        "shopifyApi": {
+          "id": "8",
+          "name": "Shopify API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.woocommerceUrl }}/wp-json/wc/v3/products/{{ $json.product_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "stock_quantity",
+              "value": "={{ $json.target_stock }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "woocommerce-update-inventory",
+      "name": "WooCommerce - Update Inventory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1850, 400],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "9",
+          "name": "WooCommerce API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-alerts",
+              "leftValue": "={{ $json.lowStockAlerts.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-low-stock",
+      "name": "Check Low Stock Alerts",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1250, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format low stock alerts for Slack\nconst data = $input.first().json;\nconst alerts = data.lowStockAlerts;\n\nlet message = `🚨 *Inventory Low Stock Alert*\\n\\n`;\nmessage += `Total items requiring attention: ${alerts.length}\\n`;\nmessage += `Critical (Out of Stock): ${alerts.filter(a => a.alert_level === 'CRITICAL').length}\\n\\n`;\n\n// Group by alert level\nconst critical = alerts.filter(a => a.alert_level === 'CRITICAL');\nconst warnings = alerts.filter(a => a.alert_level === 'WARNING');\n\nif (critical.length > 0) {\n  message += `*🔴 CRITICAL - Out of Stock:*\\n`;\n  critical.forEach(alert => {\n    message += `• ${alert.title} (SKU: ${alert.sku})\\n`;\n    message += `  Platforms: ${alert.platforms.join(', ')}\\n`;\n  });\n  message += `\\n`;\n}\n\nif (warnings.length > 0) {\n  message += `*🟡 WARNING - Low Stock (< 10 units):*\\n`;\n  warnings.slice(0, 10).forEach(alert => {\n    message += `• ${alert.title} (SKU: ${alert.sku})\\n`;\n    message += `  Stock: ${alert.current_stock} | Platforms: ${alert.platforms.join(', ')}\\n`;\n  });\n  \n  if (warnings.length > 10) {\n    message += `\\n... and ${warnings.length - 10} more items\\n`;\n  }\n}\n\nmessage += `\\n_Generated at ${new Date().toLocaleString()}_`;\n\nreturn {\n  json: {\n    message: message,\n    alertCount: alerts.length,\n    criticalCount: critical.length\n  }\n};"
+      },
+      "id": "format-slack-message",
+      "name": "Format Slack Alert Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 600]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": {
+          "__rl": true,
+          "value": "inventory-alerts",
+          "mode": "name"
+        },
+        "text": "={{ $json.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack-send-alert",
+      "name": "Slack - Send Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1650, 600],
+      "credentials": {
+        "slackApi": {
+          "id": "10",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO inventory_sync_log (sku, platform, previous_stock, new_stock, synced_at, status)\\nVALUES ('{{ $json.sku }}', '{{ $json.platform }}', {{ $json.current_stock }}, {{ $json.target_stock }}, NOW(), 'completed')\\nON CONFLICT (sku, platform) DO UPDATE\\nSET previous_stock = EXCLUDED.previous_stock,\\n    new_stock = EXCLUDED.new_stock,\\n    synced_at = EXCLUDED.synced_at,\\n    status = EXCLUDED.status",
+        "options": {}
+      },
+      "id": "log-sync-action",
+      "name": "Log Sync to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2050, 300],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## E-commerce Inventory Sync\\n\\n**Features:**\\n- Syncs inventory between Shopify, WooCommerce, and custom database\\n- Runs every 15 minutes\\n- Detects discrepancies and updates platforms\\n- Sends Slack alerts for low stock\\n- Logs all sync operations\\n\\n**Thresholds:**\\n- Low stock warning: < 10 units\\n- Critical: 0 units\\n\\n**Setup:**\\n- Configure Shopify API\\n- Configure WooCommerce REST API\\n- Set up PostgreSQL database\\n- Configure Slack webhook",
+        "height": 500,
+        "width": 350
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 650]
+    }
+  ],
+  "connections": {
+    "Schedule Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Shopify - Get All Products",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "WooCommerce - Get Products",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Database - Get Current Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopify - Get All Products": {
+      "main": [
+        [
+          {
+            "node": "Normalize Shopify Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WooCommerce - Get Products": {
+      "main": [
+        [
+          {
+            "node": "Normalize WooCommerce Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Shopify Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Inventory Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize WooCommerce Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Inventory Sources",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Database - Get Current Inventory": {
+      "main": [
+        [
+          {
+            "node": "Merge All Inventory Sources",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge All Inventory Sources": {
+      "main": [
+        [
+          {
+            "node": "Consolidate and Analyze Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consolidate and Analyze Inventory": {
+      "main": [
+        [
+          {
+            "node": "Check if Sync Needed",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Low Stock Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Sync Needed": {
+      "main": [
+        [
+          {
+            "node": "Split Sync Actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Sync Actions": {
+      "main": [
+        [
+          {
+            "node": "Route by Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Platform": {
+      "main": [
+        [
+          {
+            "node": "Shopify - Update Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WooCommerce - Update Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopify - Update Inventory": {
+      "main": [
+        [
+          {
+            "node": "Log Sync to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WooCommerce - Update Inventory": {
+      "main": [
+        [
+          {
+            "node": "Log Sync to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Low Stock Alerts": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Alert Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Alert Message": {
+      "main": [
+        [
+          {
+            "node": "Slack - Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-11T00:00:00.000Z",
+  "versionId": "1"
+}

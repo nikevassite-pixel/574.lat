@@ -1,0 +1,683 @@
+{
+  "name": "Project Management Task Sync (Trello, Asana, Jira)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "resource": "card",
+        "operation": "getAll",
+        "boardId": {
+          "__rl": true,
+          "value": "your-board-id",
+          "mode": "id"
+        },
+        "additionalFields": {
+          "fields": "id,name,desc,due,labels,idMembers,dateLastActivity"
+        }
+      },
+      "id": "trello-get-cards",
+      "name": "Trello - Get All Cards",
+      "type": "n8n-nodes-base.trello",
+      "typeVersion": 1,
+      "position": [450, 300],
+      "credentials": {
+        "trelloApi": {
+          "id": "18",
+          "name": "Trello API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "task",
+        "operation": "getAll",
+        "workspaceId": {
+          "__rl": true,
+          "value": "your-workspace-id",
+          "mode": "id"
+        },
+        "projectId": {
+          "__rl": true,
+          "value": "your-project-id",
+          "mode": "id"
+        },
+        "options": {
+          "fields": "gid,name,notes,due_on,completed,tags,assignee,modified_at"
+        }
+      },
+      "id": "asana-get-tasks",
+      "name": "Asana - Get All Tasks",
+      "type": "n8n-nodes-base.asana",
+      "typeVersion": 2,
+      "position": [450, 500],
+      "credentials": {
+        "asanaOAuth2Api": {
+          "id": "19",
+          "name": "Asana OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "issue",
+        "operation": "getAll",
+        "jql": "project = YOUR_PROJECT_KEY ORDER BY updated DESC",
+        "additionalFields": {
+          "fields": "summary,description,status,assignee,labels,updated,duedate"
+        },
+        "options": {}
+      },
+      "id": "jira-get-issues",
+      "name": "Jira - Get All Issues",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [450, 700],
+      "credentials": {
+        "jiraCloudApi": {
+          "id": "20",
+          "name": "Jira Cloud API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize Trello cards\nconst items = $input.all();\nconst normalized = [];\n\nitems.forEach(item => {\n  const card = item.json;\n  \n  normalized.push({\n    source: 'trello',\n    external_id: card.id,\n    title: card.name,\n    description: card.desc || '',\n    due_date: card.due || null,\n    status: 'active',\n    labels: card.labels?.map(l => l.name) || [],\n    assignees: card.idMembers || [],\n    last_modified: card.dateLastActivity,\n    synced_at: new Date().toISOString()\n  });\n});\n\nreturn normalized.map(item => ({ json: item }));"
+      },
+      "id": "normalize-trello",
+      "name": "Normalize Trello Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize Asana tasks\nconst items = $input.all();\nconst normalized = [];\n\nitems.forEach(item => {\n  const task = item.json;\n  \n  normalized.push({\n    source: 'asana',\n    external_id: task.gid,\n    title: task.name,\n    description: task.notes || '',\n    due_date: task.due_on || null,\n    status: task.completed ? 'completed' : 'active',\n    labels: task.tags?.map(t => t.name) || [],\n    assignees: task.assignee ? [task.assignee.gid] : [],\n    last_modified: task.modified_at,\n    synced_at: new Date().toISOString()\n  });\n});\n\nreturn normalized.map(item => ({ json: item }));"
+      },
+      "id": "normalize-asana",
+      "name": "Normalize Asana Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize Jira issues\nconst items = $input.all();\nconst normalized = [];\n\nitems.forEach(item => {\n  const issue = item.json;\n  \n  normalized.push({\n    source: 'jira',\n    external_id: issue.id,\n    title: issue.fields.summary,\n    description: issue.fields.description || '',\n    due_date: issue.fields.duedate || null,\n    status: issue.fields.status.name.toLowerCase(),\n    labels: issue.fields.labels || [],\n    assignees: issue.fields.assignee ? [issue.fields.assignee.accountId] : [],\n    last_modified: issue.fields.updated,\n    synced_at: new Date().toISOString()\n  });\n});\n\nreturn normalized.map(item => ({ json: item }));"
+      },
+      "id": "normalize-jira",
+      "name": "Normalize Jira Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 700]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll"
+      },
+      "id": "merge-all-tasks",
+      "name": "Merge All Tasks",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [850, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT external_id, source, title, status, last_modified, sync_hash FROM task_sync_state",
+        "options": {}
+      },
+      "id": "get-sync-state",
+      "name": "Get Current Sync State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [450, 500],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Detect conflicts and determine sync actions\nconst allTasks = $input.first().json;\nconst syncState = $input.item(1).json;\n\n// Create sync state map\nconst stateMap = new Map();\nif (Array.isArray(syncState)) {\n  syncState.forEach(item => {\n    const key = `${item.source}:${item.external_id}`;\n    stateMap.set(key, item);\n  });\n}\n\n// Process tasks and detect changes\nconst syncActions = [];\nconst conflicts = [];\n\nallTasks.forEach(task => {\n  const key = `${task.source}:${task.external_id}`;\n  const currentState = stateMap.get(key);\n  \n  // Generate hash for change detection\n  const taskHash = require('crypto')\n    .createHash('md5')\n    .update(JSON.stringify({\n      title: task.title,\n      description: task.description,\n      status: task.status,\n      due_date: task.due_date\n    }))\n    .digest('hex');\n  \n  task.sync_hash = taskHash;\n  \n  if (!currentState) {\n    // New task\n    syncActions.push({\n      action: 'create',\n      task: task,\n      targets: ['trello', 'asana', 'jira'].filter(t => t !== task.source)\n    });\n  } else if (currentState.sync_hash !== taskHash) {\n    // Task has been modified\n    const lastModified = new Date(task.last_modified);\n    const stateModified = new Date(currentState.last_modified);\n    \n    if (lastModified > stateModified) {\n      // Check for conflicts\n      const conflictingTasks = allTasks.filter(t => \n        t.title === task.title && \n        t.source !== task.source &&\n        new Date(t.last_modified) > stateModified\n      );\n      \n      if (conflictingTasks.length > 0) {\n        conflicts.push({\n          title: task.title,\n          sources: [task.source, ...conflictingTasks.map(t => t.source)],\n          resolution_strategy: 'most_recent',\n          selected: task // Use most recently modified\n        });\n      }\n      \n      syncActions.push({\n        action: 'update',\n        task: task,\n        targets: ['trello', 'asana', 'jira'].filter(t => t !== task.source)\n      });\n    }\n  }\n});\n\nreturn {\n  json: {\n    sync_actions: syncActions,\n    conflicts: conflicts,\n    summary: {\n      total_tasks: allTasks.length,\n      actions_needed: syncActions.length,\n      conflicts_detected: conflicts.length\n    }\n  }\n};"
+      },
+      "id": "detect-conflicts",
+      "name": "Detect Conflicts and Changes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 500]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-actions",
+              "leftValue": "={{ $json.sync_actions.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-sync-needed",
+      "name": "Check if Sync Needed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1250, 500]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "sync_actions",
+        "options": {}
+      },
+      "id": "split-sync-actions",
+      "name": "Split Sync Actions",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [1450, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Route sync action to appropriate platform\nconst syncAction = $input.first().json;\nconst task = syncAction.task;\n\nconst routedActions = [];\n\nsyncAction.targets.forEach(target => {\n  routedActions.push({\n    target: target,\n    action: syncAction.action,\n    task: task\n  });\n});\n\nreturn routedActions.map(action => ({ json: action }));"
+      },
+      "id": "route-actions",
+      "name": "Route to Target Platforms",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 500]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-trello",
+              "leftValue": "={{ $json.target }}",
+              "rightValue": "trello",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-target",
+      "name": "Check Target Platform",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1850, 400]
+    },
+    {
+      "parameters": {
+        "resource": "card",
+        "operation": "create",
+        "boardId": {
+          "__rl": true,
+          "value": "your-board-id",
+          "mode": "id"
+        },
+        "listId": {
+          "__rl": true,
+          "value": "your-list-id",
+          "mode": "id"
+        },
+        "name": "={{ $json.task.title }}",
+        "additionalFields": {
+          "description": "={{ $json.task.description }}",
+          "due": "={{ $json.task.due_date }}"
+        }
+      },
+      "id": "trello-create-card",
+      "name": "Trello - Create/Update Card",
+      "type": "n8n-nodes-base.trello",
+      "typeVersion": 1,
+      "position": [2050, 300],
+      "credentials": {
+        "trelloApi": {
+          "id": "18",
+          "name": "Trello API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "task",
+        "operation": "create",
+        "workspaceId": {
+          "__rl": true,
+          "value": "your-workspace-id",
+          "mode": "id"
+        },
+        "name": "={{ $json.task.title }}",
+        "otherProperties": {
+          "notes": "={{ $json.task.description }}",
+          "due_on": "={{ $json.task.due_date }}"
+        }
+      },
+      "id": "asana-create-task",
+      "name": "Asana - Create/Update Task",
+      "type": "n8n-nodes-base.asana",
+      "typeVersion": 2,
+      "position": [2050, 500],
+      "credentials": {
+        "asanaOAuth2Api": {
+          "id": "19",
+          "name": "Asana OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "issue",
+        "operation": "create",
+        "project": {
+          "__rl": true,
+          "value": "YOUR_PROJECT_KEY",
+          "mode": "name"
+        },
+        "issueType": {
+          "__rl": true,
+          "value": "Task",
+          "mode": "name"
+        },
+        "summary": "={{ $json.task.title }}",
+        "additionalFields": {
+          "description": "={{ $json.task.description }}",
+          "duedate": "={{ $json.task.due_date }}"
+        }
+      },
+      "id": "jira-create-issue",
+      "name": "Jira - Create/Update Issue",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [2050, 700],
+      "credentials": {
+        "jiraCloudApi": {
+          "id": "20",
+          "name": "Jira Cloud API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-conflicts",
+              "leftValue": "={{ $json.conflicts.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-conflicts",
+      "name": "Check for Conflicts",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1250, 700]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format conflict notification\nconst data = $input.first().json;\nconst conflicts = data.conflicts;\n\nlet message = `⚠️ *Task Sync Conflicts Detected*\\n\\n`;\nmessage += `Found ${conflicts.length} conflict${conflicts.length > 1 ? 's' : ''} during sync:\\n\\n`;\n\nconflicts.forEach((conflict, index) => {\n  message += `*${index + 1}. ${conflict.title}*\\n`;\n  message += `Platforms: ${conflict.sources.join(', ')}\\n`;\n  message += `Resolution: Using most recent version from ${conflict.selected.source}\\n\\n`;\n});\n\nmessage += `_Sync completed at ${new Date().toLocaleString()}_`;\n\nreturn { json: { message: message, conflict_count: conflicts.length } };"
+      },
+      "id": "format-conflict-notification",
+      "name": "Format Conflict Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 700]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": {
+          "__rl": true,
+          "value": "project-sync",
+          "mode": "name"
+        },
+        "text": "={{ $json.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack-conflict-alert",
+      "name": "Slack - Send Conflict Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1650, 700],
+      "credentials": {
+        "slackApi": {
+          "id": "10",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO task_sync_state (external_id, source, title, description, status, due_date, sync_hash, last_modified, synced_at)\\nVALUES ('{{ $json.external_id }}', '{{ $json.source }}', '{{ $json.title }}', '{{ $json.description }}', '{{ $json.status }}', '{{ $json.due_date }}', '{{ $json.sync_hash }}', '{{ $json.last_modified }}', NOW())\\nON CONFLICT (external_id, source) DO UPDATE\\nSET title = EXCLUDED.title,\\n    description = EXCLUDED.description,\\n    status = EXCLUDED.status,\\n    due_date = EXCLUDED.due_date,\\n    sync_hash = EXCLUDED.sync_hash,\\n    last_modified = EXCLUDED.last_modified,\\n    synced_at = EXCLUDED.synced_at",
+        "options": {}
+      },
+      "id": "update-sync-state",
+      "name": "Update Sync State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2250, 500],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Project Management Task Sync\\n\\n**Platforms:**\\n- Trello\\n- Asana\\n- Jira\\n\\n**Features:**\\n- Bi-directional synchronization\\n- Conflict detection and resolution\\n- Change detection with hashing\\n- Automated notifications\\n- Sync state tracking\\n\\n**Conflict Resolution:**\\n- Strategy: Most recent wins\\n- Notifications sent to Slack\\n- Manual review option\\n\\n**Sync Frequency:**\\nEvery 5 minutes\\n\\n**Setup:**\\n- Trello API credentials\\n- Asana OAuth2\\n- Jira Cloud API\\n- PostgreSQL database\\n- Slack workspace",
+        "height": 650,
+        "width": 350
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 850]
+    }
+  ],
+  "connections": {
+    "Schedule Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Trello - Get All Cards",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Asana - Get All Tasks",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Jira - Get All Issues",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Current Sync State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trello - Get All Cards": {
+      "main": [
+        [
+          {
+            "node": "Normalize Trello Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Asana - Get All Tasks": {
+      "main": [
+        [
+          {
+            "node": "Normalize Asana Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jira - Get All Issues": {
+      "main": [
+        [
+          {
+            "node": "Normalize Jira Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Trello Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Asana Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Tasks",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Normalize Jira Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Tasks",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge All Tasks": {
+      "main": [
+        [
+          {
+            "node": "Detect Conflicts and Changes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Current Sync State": {
+      "main": [
+        [
+          {
+            "node": "Detect Conflicts and Changes",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Detect Conflicts and Changes": {
+      "main": [
+        [
+          {
+            "node": "Check if Sync Needed",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check for Conflicts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Sync Needed": {
+      "main": [
+        [
+          {
+            "node": "Split Sync Actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Sync Actions": {
+      "main": [
+        [
+          {
+            "node": "Route to Target Platforms",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route to Target Platforms": {
+      "main": [
+        [
+          {
+            "node": "Check Target Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Target Platform": {
+      "main": [
+        [
+          {
+            "node": "Trello - Create/Update Card",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Asana - Create/Update Task",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Jira - Create/Update Issue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trello - Create/Update Card": {
+      "main": [
+        [
+          {
+            "node": "Update Sync State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Asana - Create/Update Task": {
+      "main": [
+        [
+          {
+            "node": "Update Sync State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jira - Create/Update Issue": {
+      "main": [
+        [
+          {
+            "node": "Update Sync State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Conflicts": {
+      "main": [
+        [
+          {
+            "node": "Format Conflict Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Conflict Notification": {
+      "main": [
+        [
+          {
+            "node": "Slack - Send Conflict Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-11T00:00:00.000Z",
+  "versionId": "1"
+}

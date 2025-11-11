@@ -1,0 +1,459 @@
+{
+  "name": "Customer Support Ticket Routing with NLP",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "from": "support@yourcompany.com",
+          "labelIds": ["INBOX", "UNREAD"]
+        },
+        "options": {
+          "dataPropertyAttachmentsPrefixName": "attachment_"
+        }
+      },
+      "id": "gmail-trigger",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 400],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "11",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and clean email data\nconst item = $input.first().json;\n\nconst extractText = (html) => {\n  if (!html) return '';\n  return html\n    .replace(/<[^>]*>/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n};\n\nconst extractedData = {\n  email_id: item.id,\n  thread_id: item.threadId,\n  from: item.payload.headers.find(h => h.name === 'From')?.value || '',\n  subject: item.payload.headers.find(h => h.name === 'Subject')?.value || '',\n  date: item.payload.headers.find(h => h.name === 'Date')?.value || '',\n  body_text: extractText(item.snippet || ''),\n  has_attachments: (item.payload.parts?.some(p => p.filename) || false),\n  labels: item.labelIds || [],\n  received_at: new Date().toISOString()\n};\n\n// Extract email address\nconst emailMatch = extractedData.from.match(/<(.+?)>/);\nextractedData.sender_email = emailMatch ? emailMatch[1] : extractedData.from;\n\n// Combine subject and body for analysis\nextractedData.full_text = `${extractedData.subject} ${extractedData.body_text}`;\n\nreturn { json: extractedData };"
+      },
+      "id": "extract-email-data",
+      "name": "Extract Email Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 400]
+    },
+    {
+      "parameters": {
+        "url": "https://api-inference.huggingface.co/models/facebook/bart-large-mnli",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.huggingfaceToken }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\\n  \"inputs\": $json.full_text,\\n  \"parameters\": {\\n    \"candidate_labels\": [\\n      \"technical_support\",\\n      \"billing_question\",\\n      \"account_issue\",\\n      \"feature_request\",\\n      \"bug_report\",\\n      \"general_inquiry\",\\n      \"complaint\",\\n      \"refund_request\"\\n    ]\\n  }\\n} }}",
+        "options": {}
+      },
+      "id": "huggingface-classify",
+      "name": "Hugging Face - Classify Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "12",
+          "name": "Hugging Face API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.huggingfaceToken }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"inputs\": $json.full_text } }}",
+        "options": {}
+      },
+      "id": "sentiment-analysis",
+      "name": "Sentiment Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 500],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "12",
+          "name": "Hugging Face API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition"
+      },
+      "id": "merge-classifications",
+      "name": "Merge Classifications",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [850, 450]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process classification results and determine routing\nconst emailData = $input.first().json;\nconst classification = emailData[0]; // Hugging Face classification\nconst sentiment = emailData[1]; // Sentiment analysis\n\n// Extract top category\nconst topCategory = classification.labels[0];\nconst topScore = classification.scores[0];\n\n// Extract sentiment\nconst topSentiment = sentiment[0][0];\nconst sentimentScore = topSentiment.score;\nconst sentimentLabel = topSentiment.label; // POSITIVE or NEGATIVE\n\n// Determine priority\nlet priority = 'medium';\nif (sentimentLabel === 'NEGATIVE' && sentimentScore > 0.8) {\n  priority = 'high';\n} else if (['billing_question', 'refund_request', 'complaint'].includes(topCategory)) {\n  priority = 'high';\n} else if (['feature_request', 'general_inquiry'].includes(topCategory)) {\n  priority = 'low';\n}\n\n// Determine Zendesk group and assignee\nconst routingMap = {\n  'technical_support': { group_id: 123456, tags: ['technical', 'support'] },\n  'billing_question': { group_id: 123457, tags: ['billing', 'finance'] },\n  'account_issue': { group_id: 123458, tags: ['account', 'access'] },\n  'feature_request': { group_id: 123459, tags: ['feature', 'product'] },\n  'bug_report': { group_id: 123460, tags: ['bug', 'engineering'] },\n  'general_inquiry': { group_id: 123461, tags: ['general', 'support'] },\n  'complaint': { group_id: 123462, tags: ['complaint', 'escalation'] },\n  'refund_request': { group_id: 123457, tags: ['refund', 'billing'] }\n};\n\nconst routing = routingMap[topCategory] || routingMap['general_inquiry'];\n\nconst processedTicket = {\n  ...emailData,\n  category: topCategory,\n  category_confidence: topScore,\n  sentiment: sentimentLabel.toLowerCase(),\n  sentiment_score: sentimentScore,\n  priority: priority,\n  zendesk_group_id: routing.group_id,\n  tags: routing.tags,\n  auto_response_needed: sentimentLabel === 'NEGATIVE' && sentimentScore > 0.8,\n  escalation_needed: priority === 'high' && sentimentLabel === 'NEGATIVE'\n};\n\nreturn { json: processedTicket };"
+      },
+      "id": "process-and-route",
+      "name": "Process and Determine Routing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 450]
+    },
+    {
+      "parameters": {
+        "resource": "ticket",
+        "operation": "create",
+        "subject": "={{ $json.subject }}",
+        "description": "={{ $json.body_text }}",
+        "additionalFields": {
+          "priority": "={{ $json.priority }}",
+          "tags": "={{ $json.tags.join(',') }}",
+          "group_id": "={{ $json.zendesk_group_id }}",
+          "custom_fields": "={{ { category: $json.category, sentiment: $json.sentiment, auto_classified: true } }}"
+        }
+      },
+      "id": "zendesk-create-ticket",
+      "name": "Zendesk - Create Ticket",
+      "type": "n8n-nodes-base.zendesk",
+      "typeVersion": 1,
+      "position": [1250, 450],
+      "credentials": {
+        "zendeskApi": {
+          "id": "13",
+          "name": "Zendesk API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "needs-auto-response",
+              "leftValue": "={{ $json.auto_response_needed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-auto-response",
+      "name": "Check Auto-Response Needed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1450, 350]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate auto-response based on category\nconst ticket = $input.first().json;\n\nconst responseTemplates = {\n  'technical_support': `Thank you for contacting technical support. We've received your inquiry and a specialist will review your case shortly. In the meantime, please check our knowledge base for immediate solutions.`,\n  \n  'billing_question': `Thank you for reaching out regarding your billing inquiry. Our billing team has been notified and will review your account. You should expect a response within 24 hours.`,\n  \n  'complaint': `We sincerely apologize for any inconvenience you've experienced. Your feedback is very important to us. A senior support specialist has been assigned to your case and will contact you shortly.`,\n  \n  'refund_request': `Thank you for your refund request. Our billing team will review your case according to our refund policy. You'll receive a response within 1-2 business days.`,\n  \n  'bug_report': `Thank you for reporting this issue. Our engineering team has been notified and will investigate. We'll keep you updated on the progress.`,\n  \n  'default': `Thank you for contacting us. We've received your message and will respond as soon as possible.`\n};\n\nconst responseBody = responseTemplates[ticket.category] || responseTemplates['default'];\n\nconst autoResponse = {\n  to: ticket.sender_email,\n  subject: `Re: ${ticket.subject}`,\n  body: `Dear Customer,\\n\\n${responseBody}\\n\\nTicket ID: ${ticket.zendesk_ticket_id}\\nPriority: ${ticket.priority.toUpperCase()}\\n\\nBest regards,\\nCustomer Support Team`,\n  ticket_id: ticket.zendesk_ticket_id\n};\n\nreturn { json: autoResponse };"
+      },
+      "id": "generate-auto-response",
+      "name": "Generate Auto-Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "send-auto-response",
+      "name": "Gmail - Send Auto-Response",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1850, 300],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "11",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "needs-escalation",
+              "leftValue": "={{ $json.escalation_needed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-escalation",
+      "name": "Check Escalation Needed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1450, 550]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": {
+          "__rl": true,
+          "value": "support-escalations",
+          "mode": "name"
+        },
+        "text": "=🚨 *URGENT TICKET ESCALATION*\\n\\n*Ticket ID:* {{ $json.zendesk_ticket_id }}\\n*From:* {{ $json.sender_email }}\\n*Subject:* {{ $json.subject }}\\n*Category:* {{ $json.category }}\\n*Sentiment:* {{ $json.sentiment }} ({{ ($json.sentiment_score * 100).toFixed(1) }}% confident)\\n*Priority:* {{ $json.priority.toUpperCase() }}\\n\\n*Reason for Escalation:* High priority negative sentiment detected\\n\\n*Preview:* {{ $json.body_text.substring(0, 150) }}...\\n\\nPlease review and respond immediately.",
+        "otherOptions": {}
+      },
+      "id": "slack-escalation-alert",
+      "name": "Slack - Send Escalation Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1650, 550],
+      "credentials": {
+        "slackApi": {
+          "id": "10",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO support_tickets_log (\\n  email_id,\\n  sender_email,\\n  subject,\\n  category,\\n  category_confidence,\\n  sentiment,\\n  sentiment_score,\\n  priority,\\n  zendesk_ticket_id,\\n  auto_response_sent,\\n  escalated,\\n  created_at\\n) VALUES (\\n  '{{ $json.email_id }}',\\n  '{{ $json.sender_email }}',\\n  '{{ $json.subject }}',\\n  '{{ $json.category }}',\\n  {{ $json.category_confidence }},\\n  '{{ $json.sentiment }}',\\n  {{ $json.sentiment_score }},\\n  '{{ $json.priority }}',\\n  '{{ $json.zendesk_ticket_id }}',\\n  {{ $json.auto_response_needed }},\\n  {{ $json.escalation_needed }},\\n  NOW()\\n)",
+        "options": {}
+      },
+      "id": "log-to-database",
+      "name": "Log to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1650, 450],
+      "credentials": {
+        "postgres": {
+          "id": "7",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabel",
+        "messageId": "={{ $json.email_id }}",
+        "labelIds": ["LABEL_PROCESSED"],
+        "options": {}
+      },
+      "id": "mark-email-processed",
+      "name": "Mark Email as Processed",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1850, 450],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "11",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Customer Support Ticket Routing\\n\\n**AI-Powered Features:**\\n- Automatic categorization using BART-large-MNLI\\n- Sentiment analysis with DistilBERT\\n- Smart priority assignment\\n- Auto-routing to correct Zendesk queues\\n\\n**Categories:**\\n- Technical Support\\n- Billing Questions\\n- Account Issues\\n- Feature Requests\\n- Bug Reports\\n- General Inquiry\\n- Complaints\\n- Refund Requests\\n\\n**Setup:**\\n- Gmail API with OAuth2\\n- Hugging Face API token\\n- Zendesk API credentials\\n- Slack workspace\\n- PostgreSQL database",
+        "height": 600,
+        "width": 350
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 700]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Email Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Email Data": {
+      "main": [
+        [
+          {
+            "node": "Hugging Face - Classify Ticket",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sentiment Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hugging Face - Classify Ticket": {
+      "main": [
+        [
+          {
+            "node": "Merge Classifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sentiment Analysis": {
+      "main": [
+        [
+          {
+            "node": "Merge Classifications",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Classifications": {
+      "main": [
+        [
+          {
+            "node": "Process and Determine Routing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process and Determine Routing": {
+      "main": [
+        [
+          {
+            "node": "Zendesk - Create Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Zendesk - Create Ticket": {
+      "main": [
+        [
+          {
+            "node": "Check Auto-Response Needed",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Escalation Needed",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Auto-Response Needed": {
+      "main": [
+        [
+          {
+            "node": "Generate Auto-Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Auto-Response": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Send Auto-Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Escalation Needed": {
+      "main": [
+        [
+          {
+            "node": "Slack - Send Escalation Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to Database": {
+      "main": [
+        [
+          {
+            "node": "Mark Email as Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-11-11T00:00:00.000Z",
+  "versionId": "1"
+}
