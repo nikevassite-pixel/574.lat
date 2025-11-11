@@ -1,0 +1,73 @@
+{
+  "name": "NFT Rarity Tracker & Analytics",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "hours", "hoursInterval": 6}]
+        }
+      },
+      "id": "schedule",
+      "name": "Schedule - Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.opensea.io/api/v1/collection/{{ $env.NFT_COLLECTION_SLUG }}/stats"
+      },
+      "id": "fetch-stats",
+      "name": "OpenSea - Fetch Collection Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Analyze NFT collection metrics and provide insights. Return JSON with: market_trend, price_prediction, rarity_insights, investment_recommendation.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json) }}\n    }\n  ],\n  \"temperature\": 0.4,\n  \"response_format\": { \"type\": \"json_object\" }\n}"
+      },
+      "id": "analyze",
+      "name": "GPT-4 - Analyze NFT Market",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO nft_analytics (collection_slug, floor_price, volume_24h, market_trend, ai_insights) VALUES ('{{ $env.NFT_COLLECTION_SLUG }}', {{ $('OpenSea - Fetch Collection Stats').item.json.stats.floor_price }}, {{ $('OpenSea - Fetch Collection Stats').item.json.stats.one_day_volume }}, '{{ JSON.parse($json.choices[0].message.content).market_trend }}', '{{ $json.choices[0].message.content }}') RETURNING *;"
+      },
+      "id": "save-analytics",
+      "name": "PostgreSQL - Save Analytics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [850, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule - Every 6 Hours": {
+      "main": [[{"node": "OpenSea - Fetch Collection Stats", "type": "main", "index": 0}]]
+    },
+    "OpenSea - Fetch Collection Stats": {
+      "main": [[{"node": "GPT-4 - Analyze NFT Market", "type": "main", "index": 0}]]
+    },
+    "GPT-4 - Analyze NFT Market": {
+      "main": [[{"node": "PostgreSQL - Save Analytics", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}

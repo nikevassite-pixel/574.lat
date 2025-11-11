@@ -1,0 +1,142 @@
+{
+  "name": "DeFi Yield Farming Optimizer",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "hours", "hoursInterval": 4}]
+        }
+      },
+      "id": "schedule",
+      "name": "Schedule - Every 4 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.llama.fi/pools",
+        "options": {}
+      },
+      "id": "fetch-defi-pools",
+      "name": "DeFi Llama - Fetch Yield Pools",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const pools = $input.item.json.data || [];\n\n// Filter and rank pools\nconst filteredPools = pools\n  .filter(pool => {\n    return pool.apy > 5 && // Minimum 5% APY\n           pool.tvlUsd > 1000000 && // Min $1M TVL\n           pool.il7d < 2 && // Low impermanent loss\n           !pool.project.toLowerCase().includes('scam')\n  })\n  .sort((a, b) => {\n    // Score = APY * (1 - IL_risk) * log(TVL)\n    const scoreA = a.apy * (1 - (a.il7d || 0) / 100) * Math.log10(a.tvlUsd);\n    const scoreB = b.apy * (1 - (b.il7d || 0) / 100) * Math.log10(b.tvlUsd);\n    return scoreB - scoreA;\n  })\n  .slice(0, 20);\n\nreturn filteredPools.map(pool => ({\n  json: {\n    pool_id: pool.pool,\n    chain: pool.chain,\n    project: pool.project,\n    symbol: pool.symbol,\n    apy: pool.apy,\n    tvl_usd: pool.tvlUsd,\n    il_7d: pool.il7d || 0,\n    reward_tokens: pool.rewardTokens || [],\n    pool_meta: pool.poolMeta || '',\n    timestamp: new Date().toISOString()\n  }\n}));"
+      },
+      "id": "filter-pools",
+      "name": "Filter & Rank Top Pools",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a DeFi yield farming expert. Analyze pools and provide investment recommendations. Return JSON with: risk_rating (low|medium|high), recommendation (strong_buy|buy|hold|avoid), optimal_allocation_percentage, risks, opportunities, exit_strategy.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json) }}\n    }\n  ],\n  \"temperature\": 0.4,\n  \"response_format\": { \"type\": \"json_object\" }\n}"
+      },
+      "id": "analyze-pool",
+      "name": "GPT-4 - Analyze Pool Risk",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const poolData = $input.item.json;\nconst analysis = JSON.parse($('GPT-4 - Analyze Pool Risk').item.json.choices[0].message.content);\n\n// Calculate risk-adjusted return\nconst riskMultiplier = analysis.risk_rating === 'low' ? 1.0 : \n                        analysis.risk_rating === 'medium' ? 0.7 : 0.4;\nconst adjustedAPY = poolData.apy * riskMultiplier;\n\nconst optimizedPool = {\n  optimization_id: `opt_${Date.now()}`,\n  timestamp: new Date().toISOString(),\n  pool: {\n    id: poolData.pool_id,\n    chain: poolData.chain,\n    project: poolData.project,\n    symbol: poolData.symbol,\n    apy: poolData.apy,\n    tvl_usd: poolData.tvl_usd\n  },\n  metrics: {\n    raw_apy: poolData.apy,\n    risk_adjusted_apy: adjustedAPY.toFixed(2),\n    impermanent_loss_7d: poolData.il_7d,\n    tvl_score: Math.log10(poolData.tvl_usd).toFixed(2)\n  },\n  ai_analysis: analysis,\n  recommended_action: analysis.recommendation === 'strong_buy' || analysis.recommendation === 'buy'\n};\n\nreturn { json: optimizedPool };"
+      },
+      "id": "calculate-scores",
+      "name": "Calculate Optimization Scores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO defi_yield_opportunities (\n  optimization_id,\n  pool_id,\n  chain,\n  project,\n  symbol,\n  raw_apy,\n  risk_adjusted_apy,\n  tvl_usd,\n  risk_rating,\n  recommendation,\n  optimal_allocation,\n  ai_analysis\n) VALUES (\n  '{{ $json.optimization_id }}',\n  '{{ $json.pool.id }}',\n  '{{ $json.pool.chain }}',\n  '{{ $json.pool.project }}',\n  '{{ $json.pool.symbol }}',\n  {{ $json.pool.apy }},\n  {{ $json.metrics.risk_adjusted_apy }},\n  {{ $json.pool.tvl_usd }},\n  '{{ $json.ai_analysis.risk_rating }}',\n  '{{ $json.ai_analysis.recommendation }}',\n  {{ $json.ai_analysis.optimal_allocation_percentage || 0 }},\n  '{{ JSON.stringify($json.ai_analysis) }}'\n) RETURNING *;"
+      },
+      "id": "save-opportunity",
+      "name": "PostgreSQL - Save Opportunity",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1250, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.recommended_action }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-recommend",
+      "name": "Is Recommended?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "sendMessage",
+        "channelId": "={{ $env.SLACK_DEFI_CHANNEL }}",
+        "text": "=💎 *DeFi Yield Opportunity*\\n\\n*Pool:* {{ $json.pool.symbol }} on {{ $json.pool.chain }}\\n*Project:* {{ $json.pool.project }}\\n*APY:* {{ $json.pool.apy.toFixed(2) }}%\\n*Risk-Adjusted APY:* {{ $json.metrics.risk_adjusted_apy }}%\\n*TVL:* ${{ ($json.pool.tvl_usd / 1000000).toFixed(2) }}M\\n\\n*Risk Rating:* {{ $json.ai_analysis.risk_rating }}\\n*Recommendation:* {{ $json.ai_analysis.recommendation.toUpperCase() }}\\n*Suggested Allocation:* {{ $json.ai_analysis.optimal_allocation_percentage || 'N/A' }}%\\n\\n*Key Opportunities:*\\n{{ ($json.ai_analysis.opportunities || []).map((o, i) => `${i+1}. ${o}`).join('\\n') }}\\n\\n*Risks:*\\n{{ ($json.ai_analysis.risks || []).map((r, i) => `${i+1}. ${r}`).join('\\n') }}"
+      },
+      "id": "send-notification",
+      "name": "Slack - Send Opportunity Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1650, 250],
+      "credentials": {
+        "slackApi": {"id": "10", "name": "Slack API"}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule - Every 4 Hours": {
+      "main": [[{"node": "DeFi Llama - Fetch Yield Pools", "type": "main", "index": 0}]]
+    },
+    "DeFi Llama - Fetch Yield Pools": {
+      "main": [[{"node": "Filter & Rank Top Pools", "type": "main", "index": 0}]]
+    },
+    "Filter & Rank Top Pools": {
+      "main": [[{"node": "GPT-4 - Analyze Pool Risk", "type": "main", "index": 0}]]
+    },
+    "GPT-4 - Analyze Pool Risk": {
+      "main": [[{"node": "Calculate Optimization Scores", "type": "main", "index": 0}]]
+    },
+    "Calculate Optimization Scores": {
+      "main": [[{"node": "PostgreSQL - Save Opportunity", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Save Opportunity": {
+      "main": [[{"node": "Is Recommended?", "type": "main", "index": 0}]]
+    },
+    "Is Recommended?": {
+      "main": [
+        [{"node": "Slack - Send Opportunity Alert", "type": "main", "index": 0}],
+        []
+      ]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}

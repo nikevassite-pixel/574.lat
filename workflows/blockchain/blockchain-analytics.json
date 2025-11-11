@@ -1,0 +1,68 @@
+{
+  "name": "Blockchain Analytics & Forensics",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "analyze-address",
+        "httpMethod": "POST"
+      },
+      "id": "webhook",
+      "name": "Webhook - Address Analysis",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.etherscan.io/api?module=account&action=txlist&address={{ $json.address }}&startblock=0&endblock=99999999&sort=desc&apikey={{ $env.ETHERSCAN_API_KEY }}"
+      },
+      "id": "fetch-txs",
+      "name": "Etherscan - Fetch Transactions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Analyze blockchain transactions for patterns, suspicious activity, entity classification. Return JSON with: entity_type, risk_score, patterns_detected, suspicious_activities, recommendations.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json) }}\n    }\n  ],\n  \"temperature\": 0.3,\n  \"response_format\": { \"type\": \"json_object\" }\n}"
+      },
+      "id": "analyze",
+      "name": "GPT-4 - Analyze Activity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json"
+      },
+      "id": "response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [850, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Address Analysis": {
+      "main": [[{"node": "Etherscan - Fetch Transactions", "type": "main", "index": 0}]]
+    },
+    "Etherscan - Fetch Transactions": {
+      "main": [[{"node": "GPT-4 - Analyze Activity", "type": "main", "index": 0}]]
+    },
+    "GPT-4 - Analyze Activity": {
+      "main": [[{"node": "Webhook Response", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}

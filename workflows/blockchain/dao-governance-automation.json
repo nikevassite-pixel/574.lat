@@ -1,0 +1,154 @@
+{
+  "name": "DAO Governance & Voting Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "hours", "hoursInterval": 1}]
+        }
+      },
+      "id": "schedule",
+      "name": "Schedule - Hourly Check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "command": "node scripts/fetch-dao-proposals.js --dao-address={{ $env.DAO_CONTRACT_ADDRESS }} --network=ethereum"
+      },
+      "id": "fetch-proposals",
+      "name": "Fetch Active DAO Proposals",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const proposals = JSON.parse($input.item.json);\nconst activeProposals = proposals.filter(p => p.status === 'active');\n\nreturn activeProposals.map(proposal => ({\n  json: {\n    proposal_id: proposal.id,\n    title: proposal.title,\n    description: proposal.description,\n    proposer: proposal.proposer,\n    start_block: proposal.startBlock,\n    end_block: proposal.endBlock,\n    for_votes: proposal.forVotes,\n    against_votes: proposal.againstVotes,\n    abstain_votes: proposal.abstainVotes,\n    actions: proposal.actions,\n    timestamp: new Date().toISOString()\n  }\n}));"
+      },
+      "id": "parse-proposals",
+      "name": "Parse Active Proposals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4-turbo-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a DAO governance analyst. Analyze proposals and provide voting recommendations. Return JSON with: vote_recommendation (for|against|abstain), confidence (0-1), analysis, potential_impact, risks, benefits, key_considerations.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json) }}\n    }\n  ],\n  \"temperature\": 0.3,\n  \"response_format\": { \"type\": \"json_object\" }\n}"
+      },
+      "id": "analyze-proposal",
+      "name": "GPT-4 - Analyze Proposal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300],
+      "credentials": {
+        "openAiApi": {"id": "3", "name": "OpenAI API"}
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const proposalData = $input.item.json;\nconst analysis = JSON.parse($('GPT-4 - Analyze Proposal').item.json.choices[0].message.content);\n\n// Calculate voting power and quorum\nconst totalVotes = parseFloat(proposalData.for_votes) + parseFloat(proposalData.against_votes) + parseFloat(proposalData.abstain_votes);\nconst forPercentage = totalVotes > 0 ? (parseFloat(proposalData.for_votes) / totalVotes * 100).toFixed(2) : 0;\nconst againstPercentage = totalVotes > 0 ? (parseFloat(proposalData.against_votes) / totalVotes * 100).toFixed(2) : 0;\n\nconst report = {\n  governance_report_id: `gov_${Date.now()}`,\n  timestamp: new Date().toISOString(),\n  proposal: {\n    id: proposalData.proposal_id,\n    title: proposalData.title,\n    proposer: proposalData.proposer\n  },\n  voting_status: {\n    total_votes: totalVotes,\n    for_votes: proposalData.for_votes,\n    against_votes: proposalData.against_votes,\n    for_percentage: forPercentage,\n    against_percentage: againstPercentage,\n    current_outcome: forPercentage > 50 ? 'passing' : 'failing'\n  },\n  ai_recommendation: {\n    vote: analysis.vote_recommendation,\n    confidence: analysis.confidence,\n    analysis: analysis.analysis,\n    impact: analysis.potential_impact,\n    risks: analysis.risks,\n    benefits: analysis.benefits\n  },\n  auto_vote_decision: analysis.confidence >= 0.8 && analysis.vote_recommendation !== 'abstain'\n};\n\nreturn { json: report };"
+      },
+      "id": "generate-report",
+      "name": "Generate Governance Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.auto_vote_decision }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-auto-vote",
+      "name": "Should Auto-Vote?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "command": "=node scripts/cast-vote.js --proposal-id={{ $json.proposal.id }} --vote={{ $json.ai_recommendation.vote }} --network=ethereum"
+      },
+      "id": "cast-vote",
+      "name": "Cast DAO Vote On-Chain",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1450, 250]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO dao_governance_reports (\n  report_id,\n  proposal_id,\n  proposal_title,\n  proposer,\n  total_votes,\n  for_percentage,\n  against_percentage,\n  current_outcome,\n  ai_recommendation,\n  ai_confidence,\n  auto_voted,\n  vote_tx_hash\n) VALUES (\n  '{{ $json.governance_report_id }}',\n  '{{ $json.proposal.id }}',\n  '{{ $json.proposal.title }}',\n  '{{ $json.proposal.proposer }}',\n  {{ $json.voting_status.total_votes }},\n  {{ $json.voting_status.for_percentage }},\n  {{ $json.voting_status.against_percentage }},\n  '{{ $json.voting_status.current_outcome }}',\n  '{{ $json.ai_recommendation.vote }}',\n  {{ $json.ai_recommendation.confidence }},\n  {{ $json.auto_vote_decision }},\n  '{{ $('Cast DAO Vote On-Chain').item.json.transactionHash || \"\" }}'\n) RETURNING *;"
+      },
+      "id": "save-report",
+      "name": "PostgreSQL - Save Report",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [1650, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "resource": "channel",
+        "operation": "sendMessage",
+        "channelId": "={{ $env.SLACK_DAO_CHANNEL }}",
+        "text": "=🏛️ *DAO Governance Alert*\\n\\n*Proposal:* {{ $json.proposal.title }}\\n*ID:* {{ $json.proposal.id }}\\n\\n*Current Status:*\\n- For: {{ $json.voting_status.for_percentage }}%\\n- Against: {{ $json.voting_status.against_percentage }}%\\n- Outcome: {{ $json.voting_status.current_outcome }}\\n\\n*AI Recommendation:* {{ $json.ai_recommendation.vote.toUpperCase() }}\\n*Confidence:* {{ ($json.ai_recommendation.confidence * 100).toFixed(0) }}%\\n\\n*Analysis:* {{ $json.ai_recommendation.analysis }}\\n\\n{{ $json.auto_vote_decision ? '✅ Auto-voted based on high confidence' : '⏸️ Manual review required' }}"
+      },
+      "id": "send-notification",
+      "name": "Slack - Send Governance Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1850, 300],
+      "credentials": {
+        "slackApi": {"id": "10", "name": "Slack API"}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule - Hourly Check": {
+      "main": [[{"node": "Fetch Active DAO Proposals", "type": "main", "index": 0}]]
+    },
+    "Fetch Active DAO Proposals": {
+      "main": [[{"node": "Parse Active Proposals", "type": "main", "index": 0}]]
+    },
+    "Parse Active Proposals": {
+      "main": [[{"node": "GPT-4 - Analyze Proposal", "type": "main", "index": 0}]]
+    },
+    "GPT-4 - Analyze Proposal": {
+      "main": [[{"node": "Generate Governance Report", "type": "main", "index": 0}]]
+    },
+    "Generate Governance Report": {
+      "main": [[{"node": "Should Auto-Vote?", "type": "main", "index": 0}]]
+    },
+    "Should Auto-Vote?": {
+      "main": [
+        [{"node": "Cast DAO Vote On-Chain", "type": "main", "index": 0}],
+        [{"node": "PostgreSQL - Save Report", "type": "main", "index": 0}]
+      ]
+    },
+    "Cast DAO Vote On-Chain": {
+      "main": [[{"node": "PostgreSQL - Save Report", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Save Report": {
+      "main": [[{"node": "Slack - Send Governance Alert", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}

@@ -1,0 +1,47 @@
+{
+  "name": "Web3 Authentication & Identity Management",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "web3-auth",
+        "httpMethod": "POST"
+      },
+      "id": "webhook",
+      "name": "Webhook - Auth Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const signature = $input.item.json.signature;\nconst message = $input.item.json.message;\nconst address = $input.item.json.address;\n\nconst Web3 = require('web3');\nconst web3 = new Web3();\n\nconst recoveredAddress = web3.eth.accounts.recover(message, signature);\nconst isValid = recoveredAddress.toLowerCase() === address.toLowerCase();\n\nif (isValid) {\n  const jwt = require('jsonwebtoken');\n  const token = jwt.sign({ address: address }, process.env.JWT_SECRET, { expiresIn: '24h' });\n  \n  return {\n    json: {\n      authenticated: true,\n      address: address,\n      token: token,\n      expires_in: 86400\n    }\n  };\n} else {\n  throw new Error('Invalid signature');\n}"
+      },
+      "id": "verify",
+      "name": "Verify Web3 Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json"
+      },
+      "id": "response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [650, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Auth Request": {
+      "main": [[{"node": "Verify Web3 Signature", "type": "main", "index": 0}]]
+    },
+    "Verify Web3 Signature": {
+      "main": [[{"node": "Webhook Response", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}

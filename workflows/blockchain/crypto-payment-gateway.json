@@ -1,0 +1,64 @@
+{
+  "name": "Crypto Payment Gateway Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "create-payment",
+        "httpMethod": "POST"
+      },
+      "id": "webhook",
+      "name": "Webhook - Payment Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const amount = $input.item.json.amount;\nconst currency = $input.item.json.currency || 'USDT';\nconst orderId = $input.item.json.order_id;\n\nconst paymentAddress = process.env.PAYMENT_WALLET_ADDRESS;\nconst paymentId = `pay_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;\n\nreturn {\n  json: {\n    payment_id: paymentId,\n    order_id: orderId,\n    amount: amount,\n    currency: currency,\n    payment_address: paymentAddress,\n    status: 'pending',\n    expires_at: new Date(Date.now() + 3600000).toISOString()\n  }\n};"
+      },
+      "id": "create-payment",
+      "name": "Create Payment Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO crypto_payments (payment_id, order_id, amount, currency, payment_address, status, expires_at) VALUES ('{{ $json.payment_id }}', '{{ $json.order_id }}', {{ $json.amount }}, '{{ $json.currency }}', '{{ $json.payment_address }}', '{{ $json.status }}', '{{ $json.expires_at }}') RETURNING *;"
+      },
+      "id": "save-payment",
+      "name": "PostgreSQL - Save Payment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [650, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json"
+      },
+      "id": "response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [850, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Payment Request": {
+      "main": [[{"node": "Create Payment Request", "type": "main", "index": 0}]]
+    },
+    "Create Payment Request": {
+      "main": [[{"node": "PostgreSQL - Save Payment", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Save Payment": {
+      "main": [[{"node": "Webhook Response", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}

@@ -1,0 +1,81 @@
+{
+  "name": "Token Airdrop & Distribution Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "start-airdrop",
+        "httpMethod": "POST"
+      },
+      "id": "webhook",
+      "name": "Webhook - Start Airdrop",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT wallet_address, allocation_amount FROM airdrop_eligibility WHERE campaign_id = '{{ $json.campaign_id }}' AND status = 'eligible';"
+      },
+      "id": "fetch-eligible",
+      "name": "PostgreSQL - Fetch Eligible Wallets",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "command": "=node scripts/batch-airdrop.js --token-address={{ $('Webhook - Start Airdrop').item.json.token_address }} --recipients='{{ JSON.stringify($input.all()) }}'"
+      },
+      "id": "execute-airdrop",
+      "name": "Web3.js - Execute Batch Airdrop",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE airdrop_eligibility SET status = 'distributed', tx_hash = '{{ JSON.parse($json).transactionHash }}' WHERE campaign_id = '{{ $('Webhook - Start Airdrop').item.json.campaign_id }}';"
+      },
+      "id": "update-status",
+      "name": "PostgreSQL - Update Distribution Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.2,
+      "position": [850, 300],
+      "credentials": {
+        "postgres": {"id": "4", "name": "PostgreSQL"}
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json"
+      },
+      "id": "response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Start Airdrop": {
+      "main": [[{"node": "PostgreSQL - Fetch Eligible Wallets", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Fetch Eligible Wallets": {
+      "main": [[{"node": "Web3.js - Execute Batch Airdrop", "type": "main", "index": 0}]]
+    },
+    "Web3.js - Execute Batch Airdrop": {
+      "main": [[{"node": "PostgreSQL - Update Distribution Status", "type": "main", "index": 0}]]
+    },
+    "PostgreSQL - Update Distribution Status": {
+      "main": [[{"node": "Webhook Response", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "tags": [{"id": "blockchain", "name": "Blockchain & Web3"}],
+  "versionId": "1.0.0"
+}
